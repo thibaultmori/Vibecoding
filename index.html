@@ -1437,12 +1437,25 @@ function toast(msg, kind){
 
 function exportJSON(){ return JSON.stringify(state, null, 2); }
 
-function downloadExport(){
+async function downloadExport(){
+  const data = exportJSON();
+  const filename = 'passerelle-mee-'+todayISO()+'.json';
+  /* Hébergée en Artifact claude.ai, la page passe par la capacité « downloads » */
+  const dl = (window.claude && typeof window.claude.use==='function')
+    ? await window.claude.use('downloads').catch(()=>null) : null;
+  if(dl){
+    try{ await dl.save({filename, data}); toast('Export enregistré','good'); }
+    catch(e){
+      if(e && e.code==='declined') toast('Enregistrement annulé');
+      else toast('Enregistrement impossible — utilisez « Copier le JSON »','crit');
+    }
+    return;
+  }
   try{
-    const blob = new Blob([exportJSON()], {type:'application/json'});
+    const blob = new Blob([data], {type:'application/json'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'passerelle-mee-'+todayISO()+'.json';
+    a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
     toast('Export téléchargé');
