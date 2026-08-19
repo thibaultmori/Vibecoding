@@ -1,0 +1,1706 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Passerelle MEE</title>
+<meta name="description" content="Gestion des mises en exploitation de nouvelles plateformes — Direction Infrastructures &amp; Production">
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%2308839D" stroke-width="2.4" stroke-linecap="round"><path d="M2 17h20M5 17v-5a7 7 0 0 1 14 0v5M12 17v-7"/></svg>'>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<!--A:style-->
+<style>
+/* ============ Tokens ============ */
+:root{
+  --bg:#F2F5F6; --surface:#FFFFFF; --surface2:#EAEFF1; --surface3:#DDE5E8;
+  --ink:#17252B; --ink2:#4E6470; --ink3:#7B8F99;
+  --line:#D8E1E5; --line2:#C4D2D8;
+  --accent:#08839D; --accent-strong:#066579; --accent-ink:#075D70; --accent-soft:#DCEFF3; --on-accent:#FFFFFF;
+  --good:#1E7F45; --good-bg:#DEF2E4;
+  --info:#1D63C8; --info-bg:#E3ECFA;
+  --warn:#96590A; --warn-bg:#F9EDD8;
+  --crit:#C23A2F; --crit-bg:#FAE5E2;
+  --na:#64777F;  --na-bg:#E8EEF0;
+  --shadow:0 1px 2px rgba(23,37,43,.05),0 6px 20px rgba(23,37,43,.06);
+  --shadow-lg:0 8px 40px rgba(23,37,43,.18);
+  --r:10px; --r-s:7px;
+  --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0D1519; --surface:#141F24; --surface2:#1B282E; --surface3:#233238;
+    --ink:#E3EDF0; --ink2:#9CB1BA; --ink3:#6C838D;
+    --line:#243740; --line2:#31474F;
+    --accent:#3FB2C8; --accent-strong:#6FC8DA; --accent-ink:#7ED4E2; --accent-soft:#0F3640; --on-accent:#06252C;
+    --good:#57C185; --good-bg:#143823;
+    --info:#7FAEF0; --info-bg:#1A2F4E;
+    --warn:#E0A44E; --warn-bg:#3B2A0F;
+    --crit:#E97C71; --crit-bg:#44201B;
+    --na:#93A7AF;  --na-bg:#22323A;
+    --shadow:0 1px 2px rgba(0,0,0,.25),0 6px 20px rgba(0,0,0,.25);
+    --shadow-lg:0 8px 40px rgba(0,0,0,.5);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0D1519; --surface:#141F24; --surface2:#1B282E; --surface3:#233238;
+  --ink:#E3EDF0; --ink2:#9CB1BA; --ink3:#6C838D;
+  --line:#243740; --line2:#31474F;
+  --accent:#3FB2C8; --accent-strong:#6FC8DA; --accent-ink:#7ED4E2; --accent-soft:#0F3640; --on-accent:#06252C;
+  --good:#57C185; --good-bg:#143823;
+  --info:#7FAEF0; --info-bg:#1A2F4E;
+  --warn:#E0A44E; --warn-bg:#3B2A0F;
+  --crit:#E97C71; --crit-bg:#44201B;
+  --na:#93A7AF;  --na-bg:#22323A;
+  --shadow:0 1px 2px rgba(0,0,0,.25),0 6px 20px rgba(0,0,0,.25);
+  --shadow-lg:0 8px 40px rgba(0,0,0,.5);
+}
+
+/* ============ Base ============ */
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--ink);
+  font-family:var(--sans); font-size:14px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3{margin:0; font-weight:600; text-wrap:balance}
+p{margin:0}
+a{color:var(--accent-ink); text-decoration:none}
+a:hover{text-decoration:underline}
+button{font:inherit; color:inherit; cursor:pointer; background:none; border:none; padding:0}
+input,select,textarea{
+  font:inherit; color:var(--ink); background:var(--surface);
+  border:1px solid var(--line2); border-radius:var(--r-s);
+  padding:7px 10px;
+}
+input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,a:focus-visible,[tabindex]:focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px;
+}
+::placeholder{color:var(--ink3)}
+.mono{font-family:var(--mono); font-variant-numeric:tabular-nums}
+.muted{color:var(--ink2)}
+.tiny{font-size:12px}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms !important; transition-duration:.01ms !important}
+}
+
+/* ============ Squelette ============ */
+.app{display:grid; grid-template-columns:230px minmax(0,1fr); min-height:100vh}
+.sidebar{
+  border-right:1px solid var(--line); background:var(--surface);
+  padding:20px 14px; display:flex; flex-direction:column; gap:20px;
+  position:sticky; top:0; height:100vh;
+}
+.brand{display:flex; align-items:center; gap:10px; padding:0 8px}
+.brand-mark{
+  width:34px;height:34px; border-radius:9px; background:var(--accent); color:var(--on-accent);
+  display:flex;align-items:center;justify-content:center; flex:none;
+}
+.brand-mark svg{width:20px;height:20px}
+.brand-name{font-weight:700; font-size:16px; letter-spacing:-.2px; line-height:1.1}
+.brand-sub{font-size:10.5px; color:var(--ink3); text-transform:uppercase; letter-spacing:.8px; margin-top:2px}
+.nav{display:flex; flex-direction:column; gap:2px}
+.nav-sec{font-size:10.5px; text-transform:uppercase; letter-spacing:.9px; color:var(--ink3); padding:14px 10px 6px}
+.nav-a{
+  display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:var(--r-s);
+  color:var(--ink2); font-weight:500;
+}
+.nav-a svg{width:17px;height:17px; flex:none}
+.nav-a:hover{background:var(--surface2); color:var(--ink); text-decoration:none}
+.nav-a.active{background:var(--accent-soft); color:var(--accent-ink); font-weight:600}
+.side-foot{margin-top:auto; padding:10px; font-size:11.5px; color:var(--ink3); border-top:1px solid var(--line)}
+.main{min-width:0; padding:22px 28px 60px; max-width:1240px}
+
+/* ============ Topbar ============ */
+.topbar{display:flex; align-items:flex-end; justify-content:space-between; gap:16px; margin-bottom:18px; flex-wrap:wrap}
+.topbar h1{font-size:21px; letter-spacing:-.3px}
+.topbar .sub{color:var(--ink2); font-size:13px; margin-top:3px}
+.topbar-actions{display:flex; gap:8px; flex-wrap:wrap}
+
+/* ============ Boutons ============ */
+.btn{
+  display:inline-flex; align-items:center; gap:7px;
+  background:var(--surface); border:1px solid var(--line2); border-radius:var(--r-s);
+  padding:7px 13px; font-weight:500; color:var(--ink);
+}
+.btn:hover{background:var(--surface2)}
+.btn svg{width:15px;height:15px}
+.btn-primary{background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-weight:600}
+.btn-primary:hover{background:var(--accent-strong); border-color:var(--accent-strong)}
+.btn-ghost{border-color:transparent; background:transparent; color:var(--ink2)}
+.btn-ghost:hover{background:var(--surface2); color:var(--ink)}
+.btn-danger{color:var(--crit); border-color:var(--crit)}
+.btn-danger:hover{background:var(--crit-bg)}
+.btn-s{padding:4px 9px; font-size:12.5px; border-radius:6px}
+.btn-s svg{width:13px;height:13px}
+
+/* ============ Bandeau démo ============ */
+.banner{
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  background:var(--accent-soft); border:1px solid var(--line); color:var(--accent-ink);
+  border-radius:var(--r); padding:9px 14px; margin-bottom:18px; font-size:13px;
+}
+.banner strong{font-weight:600}
+.banner .spacer{flex:1}
+
+/* ============ Cartes / tuiles ============ */
+.card{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow)}
+.card-pad{padding:16px 18px}
+.card-head{display:flex; align-items:baseline; justify-content:space-between; gap:10px; padding:14px 18px 0}
+.card-title{font-size:13px; font-weight:600; text-transform:uppercase; letter-spacing:.7px; color:var(--ink2)}
+.tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:18px}
+.tile{background:var(--surface); border:1px solid var(--line); border-radius:var(--r); padding:13px 16px; box-shadow:var(--shadow)}
+.t-label{font-size:11px; text-transform:uppercase; letter-spacing:.8px; color:var(--ink3); font-weight:600}
+.t-num{font-family:var(--mono); font-size:28px; font-weight:600; line-height:1.15; margin-top:4px; font-variant-numeric:tabular-nums}
+.t-ctx{font-size:12px; color:var(--ink2); margin-top:2px}
+.t-num.good{color:var(--good)} .t-num.crit{color:var(--crit)} .t-num.warn{color:var(--warn)} .t-num.info{color:var(--info)}
+.dash-grid{display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:14px; align-items:start}
+.dash-col{display:flex; flex-direction:column; gap:14px; min-width:0}
+
+/* ============ Puces / chips ============ */
+.chip{
+  display:inline-flex; align-items:center; gap:5px;
+  font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:99px;
+  white-space:nowrap; line-height:1.6;
+}
+.chip.good{background:var(--good-bg); color:var(--good)}
+.chip.info{background:var(--info-bg); color:var(--info)}
+.chip.warn{background:var(--warn-bg); color:var(--warn)}
+.chip.crit{background:var(--crit-bg); color:var(--crit)}
+.chip.na{background:var(--na-bg); color:var(--na)}
+.chip.stage{background:var(--accent-soft); color:var(--accent-ink)}
+.chip.outline{background:transparent; border:1px solid var(--line2); color:var(--ink2)}
+button.chip{cursor:pointer}
+button.chip:hover{filter:brightness(.96)}
+:root[data-theme="dark"] button.chip:hover{filter:brightness(1.15)}
+
+/* ============ Barres (répartitions) ============ */
+.bars{display:flex; flex-direction:column; gap:9px}
+.bar-row{display:grid; grid-template-columns:150px minmax(0,1fr) 34px; align-items:center; gap:10px; font-size:12.5px}
+.bar-label{color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.bar-track{height:14px; background:var(--surface2); border-radius:4px; overflow:hidden}
+.bar-fill{display:block; height:100%; background:var(--accent); border-radius:0 4px 4px 0; min-width:2px}
+.bar-row.zero .bar-fill{display:none}
+.bar-val{font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right; color:var(--ink2)}
+
+/* ============ Listes du tableau de bord ============ */
+.rows{display:flex; flex-direction:column}
+.row-item{
+  display:flex; align-items:center; gap:10px; padding:10px 18px;
+  border-top:1px solid var(--line); cursor:pointer;
+}
+.row-item:hover{background:var(--surface2)}
+.row-item>svg{width:14px;height:14px;color:var(--ink3);flex:none}
+.row-main{flex:1; min-width:0}
+.row-metrics{display:flex; align-items:center; gap:8px; flex:none}
+.row-title{font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.row-sub{font-size:12px; color:var(--ink2)}
+.dchip{font-family:var(--mono); font-size:12px; font-variant-numeric:tabular-nums; color:var(--ink2); white-space:nowrap}
+.dchip.late{color:var(--crit); font-weight:600}
+.alert-dot{width:8px;height:8px;border-radius:50%;flex:none}
+.alert-dot.crit{background:var(--crit)} .alert-dot.warn{background:var(--warn)} .alert-dot.info{background:var(--info)}
+.empty-note{padding:14px 18px; color:var(--ink3); font-size:13px}
+
+/* ============ Filtres / liste plateformes ============ */
+.filters{display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:14px}
+.field{display:flex; flex-direction:column; gap:4px}
+.field>label{font-size:11px; text-transform:uppercase; letter-spacing:.7px; color:var(--ink3); font-weight:600}
+.field select,.field input{min-width:130px}
+.search-box{position:relative}
+.search-box svg{position:absolute; left:9px; top:50%; transform:translateY(-50%); width:14px; height:14px; color:var(--ink3)}
+.search-box input{padding-left:30px; min-width:220px}
+.table-wrap{overflow-x:auto; border:1px solid var(--line); border-radius:var(--r); background:var(--surface); box-shadow:var(--shadow)}
+table.plist{width:100%; border-collapse:collapse; font-size:13.5px; min-width:820px}
+.plist th{
+  text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.7px;
+  color:var(--ink3); font-weight:600; padding:11px 14px; border-bottom:1px solid var(--line);
+  white-space:nowrap; background:var(--surface);
+}
+.plist td{padding:11px 14px; border-bottom:1px solid var(--line); vertical-align:middle}
+.plist tr:last-child td{border-bottom:none}
+.plist tbody tr{cursor:pointer}
+.plist tbody tr:hover{background:var(--surface2)}
+.p-name{font-weight:600}
+.p-type{font-size:12px; color:var(--ink3)}
+.mini-bar{width:76px; height:5px; background:var(--surface3); border-radius:3px; overflow:hidden; display:inline-block; vertical-align:middle}
+.mini-fill{display:block; height:100%; background:var(--accent)}
+.mini-fill.ok{background:var(--good)}
+.pct{font-family:var(--mono); font-size:12.5px; font-variant-numeric:tabular-nums; color:var(--ink2); margin-left:8px}
+
+/* ============ Kanban ============ */
+.kanban{display:grid; grid-auto-flow:column; grid-auto-columns:252px; gap:12px; overflow-x:auto; padding-bottom:14px; align-items:start}
+.kcol{background:var(--surface2); border:1px solid var(--line); border-radius:var(--r); min-height:120px}
+.kcol-head{display:flex; align-items:center; justify-content:space-between; padding:10px 12px 6px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.6px; color:var(--ink2)}
+.kcount{font-family:var(--mono); background:var(--surface3); border-radius:99px; padding:0 8px; font-size:11.5px; color:var(--ink2)}
+.kcards{display:flex; flex-direction:column; gap:8px; padding:6px 8px 10px; min-height:60px}
+.kcard{
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--r-s);
+  padding:10px 12px; cursor:grab; box-shadow:var(--shadow);
+}
+.kcard:active{cursor:grabbing}
+.kcard.dragging{opacity:.45}
+.k-title{font-weight:600; font-size:13px; line-height:1.35; margin-bottom:6px}
+.k-meta{display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:8px}
+.k-foot{display:flex; justify-content:space-between; align-items:center; font-size:11.5px; color:var(--ink3); margin-top:7px}
+.kcol.dragover{outline:2px dashed var(--accent); outline-offset:-3px; background:var(--accent-soft)}
+
+/* ============ Fiche plateforme ============ */
+.backlink{display:inline-flex; align-items:center; gap:6px; color:var(--ink2); font-size:13px; margin-bottom:10px}
+.backlink svg{width:14px;height:14px}
+.det-head{padding:18px 20px}
+.det-title-row{display:flex; align-items:flex-start; justify-content:space-between; gap:14px; flex-wrap:wrap}
+.det-title-row h1{font-size:22px; letter-spacing:-.3px}
+.det-chips{display:flex; gap:6px; flex-wrap:wrap; margin-top:8px}
+.meta-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px 22px; margin-top:16px}
+.meta-item .m-label{font-size:10.5px; text-transform:uppercase; letter-spacing:.7px; color:var(--ink3); font-weight:600}
+.meta-item .m-val{font-size:13.5px; margin-top:1px}
+.desc{margin-top:14px; color:var(--ink2); font-size:13.5px; max-width:72ch}
+.det-grid{display:grid; grid-template-columns:minmax(0,7fr) minmax(260px,3fr); gap:14px; align-items:start; margin-top:14px}
+.det-col{display:flex; flex-direction:column; gap:14px; min-width:0}
+
+/* Étapes (stepper) */
+.stepper{display:flex; flex-wrap:wrap; gap:6px; padding:12px 18px 16px}
+.step{
+  display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:500;
+  border:1px solid var(--line2); border-radius:99px; padding:3px 11px; color:var(--ink2); background:var(--surface);
+}
+.step:hover{background:var(--surface2)}
+.step .n{font-family:var(--mono); font-size:10.5px; color:var(--ink3)}
+.step.done{border-color:transparent; background:var(--surface2); color:var(--ink2)}
+.step.done .n{color:var(--good)}
+.step.current{background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-weight:600}
+.step.current .n{color:var(--on-accent)}
+
+/* Checklist */
+.cat{border-top:1px solid var(--line)}
+.cat-head{
+  width:100%; display:flex; align-items:center; gap:10px; padding:11px 18px;
+  text-align:left; background:none;
+}
+.cat-head:hover{background:var(--surface2)}
+.cat-chevron{width:14px;height:14px; color:var(--ink3); flex:none; transition:transform .15s}
+.cat.open .cat-chevron{transform:rotate(90deg)}
+.cat-name{font-weight:600; flex:1; min-width:0}
+.cat-team{font-size:11.5px; color:var(--ink3)}
+.cat-count{font-family:var(--mono); font-size:12px; color:var(--ink2); font-variant-numeric:tabular-nums; white-space:nowrap}
+.cat-bar{width:60px; height:5px; background:var(--surface3); border-radius:3px; overflow:hidden; flex:none}
+.cat-bar i{display:block; height:100%; background:var(--accent)}
+.cat-bar i.ok{background:var(--good)}
+.cat-body{padding:2px 18px 12px}
+.item{
+  display:grid; grid-template-columns:84px minmax(0,1fr) 150px 118px 30px;
+  gap:10px; align-items:center; padding:6px 0; border-top:1px dashed var(--line);
+}
+.item:first-child{border-top:none}
+.item .st{justify-content:center; min-width:78px}
+.i-label{font-size:13.5px}
+.i-label.done{color:var(--ink3); text-decoration:line-through; text-decoration-color:var(--line2)}
+.i-label.na{color:var(--ink3)}
+.sel-s{padding:4px 6px; font-size:12px; border-radius:6px; width:100%; background:var(--surface); color:var(--ink2)}
+.inp-s{padding:4px 6px; font-size:12px; border-radius:6px; width:100%; font-family:var(--mono); color:var(--ink2)}
+.icon-btn{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:26px; height:26px; border-radius:6px; color:var(--ink3);
+}
+.icon-btn:hover{background:var(--surface2); color:var(--ink)}
+.icon-btn svg{width:14px;height:14px}
+.icon-btn.has-com{color:var(--accent-ink)}
+.com-row{grid-column:1/-1; padding:2px 0 6px}
+.com-row textarea{width:100%; min-height:52px; font-size:12.5px; resize:vertical}
+.cat-foot{padding:4px 0 2px}
+
+/* Actions */
+.act-row{display:flex; align-items:center; gap:10px; padding:9px 18px; border-top:1px solid var(--line)}
+.act-chk{width:16px;height:16px; accent-color:var(--accent); flex:none; cursor:pointer}
+.act-label{flex:1; min-width:0; font-size:13.5px}
+.act-label.done{color:var(--ink3); text-decoration:line-through}
+.act-meta{font-size:12px; color:var(--ink3); white-space:nowrap}
+.act-meta .late{color:var(--crit); font-weight:600}
+
+/* Journal */
+.j-row{display:flex; gap:12px; padding:8px 18px; border-top:1px solid var(--line); font-size:13px}
+.j-ts{font-family:var(--mono); font-size:11.5px; color:var(--ink3); white-space:nowrap; padding-top:2px}
+.note-form{display:flex; gap:8px; padding:12px 18px; border-top:1px solid var(--line)}
+.note-form input{flex:1}
+
+/* Rail : préparation & Go/No-Go */
+.ring-wrap{display:flex; align-items:center; gap:16px; padding:16px 18px 8px}
+.ring{flex:none}
+.ring-num{font-family:var(--mono); font-size:19px; font-weight:600; fill:var(--ink)}
+.ring-cap .big{font-weight:600; font-size:14px}
+.ring-cap .tiny{color:var(--ink3)}
+.gates{display:flex; flex-direction:column; gap:4px; padding:8px 18px 16px}
+.gate{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--ink2)}
+.gate-dot{width:9px;height:9px;border-radius:50%; background:var(--surface3); flex:none; border:1px solid var(--line2)}
+.gate-dot.ok{background:var(--good); border-color:var(--good)}
+.gate-dot.part{background:var(--info); border-color:var(--info)}
+.gate .gp{margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--ink3); font-variant-numeric:tabular-nums}
+.gng-body{padding:12px 18px 16px; display:flex; flex-direction:column; gap:10px}
+.gng-status{display:flex; flex-direction:column; gap:6px}
+.gng-btns{display:flex; gap:8px; flex-wrap:wrap}
+.gng-btns .btn{flex:1; justify-content:center; min-width:70px}
+.btn-go{background:var(--good); border-color:var(--good); color:#fff; font-weight:600}
+.btn-go:hover{filter:brightness(.93); background:var(--good)}
+.btn-nogo{background:var(--crit); border-color:var(--crit); color:#fff; font-weight:600}
+.btn-nogo:hover{filter:brightness(.93); background:var(--crit)}
+.gng-warn{font-size:12.5px; color:var(--crit); font-weight:500}
+.gng-decided{border:1px solid var(--line); border-radius:var(--r-s); padding:10px 12px; background:var(--surface2)}
+.gng-decided .d-date{font-family:var(--mono); font-size:11.5px; color:var(--ink3)}
+.gng-decided .d-com{font-size:12.5px; color:var(--ink2); margin-top:4px}
+
+/* ============ Équipes ============ */
+.team-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px}
+.team-card{padding:14px 16px; display:flex; flex-direction:column; gap:3px}
+.team-name{font-weight:600}
+.team-meta{font-size:12.5px; color:var(--ink2)}
+.team-load{font-size:12px; color:var(--ink3); margin-top:6px}
+.team-foot{display:flex; gap:6px; margin-top:10px}
+
+/* ============ Paramètres ============ */
+.set-sec{margin-bottom:14px}
+.set-row{display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:6px 0}
+.set-row label{min-width:210px; color:var(--ink2); font-size:13px}
+textarea.io{width:100%; min-height:110px; font-family:var(--mono); font-size:12px}
+
+/* ============ Modale ============ */
+.modal-overlay{
+  position:fixed; inset:0; background:rgba(10,18,22,.45); z-index:50;
+  display:flex; align-items:flex-start; justify-content:center; padding:6vh 16px;
+  backdrop-filter:blur(2px);
+}
+.modal{
+  background:var(--surface); border:1px solid var(--line); border-radius:12px;
+  box-shadow:var(--shadow-lg); width:100%; max-width:560px; max-height:86vh; overflow:auto;
+}
+.m-head{display:flex; align-items:center; justify-content:space-between; padding:16px 20px 0}
+.m-head h2{font-size:16px}
+.m-body{padding:14px 20px 20px}
+.form-grid{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+.f-field{display:flex; flex-direction:column; gap:4px}
+.f-field.full{grid-column:1/-1}
+.f-field>label{font-size:11.5px; font-weight:600; color:var(--ink2)}
+.f-field textarea{min-height:70px; resize:vertical}
+.check-line{display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink2)}
+.check-line input{width:15px;height:15px; accent-color:var(--accent)}
+.m-foot{display:flex; justify-content:space-between; gap:10px; margin-top:16px}
+.m-foot .right{display:flex; gap:8px; margin-left:auto}
+
+/* ============ Toasts ============ */
+.toast-zone{position:fixed; right:16px; bottom:16px; display:flex; flex-direction:column; gap:8px; z-index:80}
+.toast{
+  background:var(--ink); color:var(--bg); border-radius:9px; padding:9px 14px;
+  font-size:13px; font-weight:500; box-shadow:var(--shadow-lg); max-width:340px;
+  animation:tin .18s ease-out;
+}
+.toast.good{background:var(--good); color:#fff}
+.toast.crit{background:var(--crit); color:#fff}
+@keyframes tin{from{opacity:0; transform:translateY(6px)}to{opacity:1; transform:none}}
+
+/* ============ État vide ============ */
+.empty{padding:44px 24px; text-align:center; color:var(--ink2)}
+.empty h2{font-size:17px; color:var(--ink); margin-bottom:6px}
+.empty p{max-width:46ch; margin:0 auto 16px}
+.empty .btn{margin:0 4px}
+
+/* ============ Impression ============ */
+@media print{
+  body{background:#fff; color:#111}
+  .sidebar,.topbar-actions,.banner,.toast-zone,.backlink,.note-form,.gng-btns,.cat-foot,.icon-btn,.stepper button.step:not(.current){display:none !important}
+  .app{display:block}
+  .main{padding:0; max-width:none}
+  .card{box-shadow:none; border-color:#bbb; break-inside:avoid}
+  .det-grid{grid-template-columns:1fr}
+  .cat-body{display:block !important}
+}
+
+/* ============ Responsive ============ */
+@media (max-width: 960px){
+  .app{grid-template-columns:1fr}
+  .sidebar{
+    position:static; height:auto; flex-direction:row; align-items:center;
+    padding:10px 14px; gap:14px; border-right:none; border-bottom:1px solid var(--line);
+    overflow-x:auto;
+  }
+  .brand-sub{display:none}
+  .nav{flex-direction:row; gap:2px}
+  .nav-sec{display:none}
+  .nav-a{padding:7px 10px; white-space:nowrap}
+  .side-foot{display:none}
+  .main{padding:16px 14px 50px}
+  .dash-grid,.det-grid{grid-template-columns:1fr}
+  .item{grid-template-columns:84px minmax(0,1fr) 30px}
+  .item .i-owner,.item .i-due{display:none}
+  .bar-row{grid-template-columns:110px minmax(0,1fr) 30px}
+}
+@media (max-width: 640px){
+  .row-item{flex-wrap:wrap; row-gap:4px}
+  .row-metrics{flex:1 1 100%}
+  .row-item>svg{display:none}
+}
+</style>
+<!--/A:style-->
+</head>
+<body>
+<!--A:body-->
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <path d="M2 17h20M5 17v-5a7 7 0 0 1 14 0v5M12 17v-7"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-name">Passerelle</div>
+        <div class="brand-sub">MEE · Infra &amp; Prod</div>
+      </div>
+    </div>
+    <nav class="nav" aria-label="Navigation principale" id="nav"></nav>
+    <div class="side-foot" id="side-foot"></div>
+  </aside>
+  <main class="main" id="view"></main>
+</div>
+<div id="modal-root"></div>
+<div class="toast-zone" id="toast-zone"></div>
+
+<script>
+'use strict';
+
+/* =================================================================
+   Passerelle — gestion des mises en exploitation (MEE)
+   Application autonome : aucune dépendance, stockage local navigateur.
+   ================================================================= */
+
+/* ---------- Constantes métier ---------- */
+
+const STAGES = [
+  {id:'cadrage', label:'Cadrage'},
+  {id:'build',   label:'Construction'},
+  {id:'recette', label:'Recette technique'},
+  {id:'preprod', label:'Pré-production'},
+  {id:'gonogo',  label:'Revue Go/No-Go'},
+  {id:'mep',     label:'Mise en production'},
+  {id:'vsr',     label:'VSR / Stabilisation'},
+  {id:'run',     label:'En exploitation'},
+];
+const stageIdx = id => STAGES.findIndex(s=>s.id===id);
+const stageLabel = id => (STAGES.find(s=>s.id===id)||{}).label || id;
+
+const CRITICITY = {
+  C1:{label:'C1 · Critique', cls:'crit'},
+  C2:{label:'C2 · Majeure',  cls:'warn'},
+  C3:{label:'C3 · Standard', cls:'info'},
+  C4:{label:'C4 · Basse',    cls:'na'},
+};
+
+const TYPES = ['Application','Infrastructure','Middleware','Data','Sécurité','Plateforme interne','SaaS / externe'];
+
+const ITEM_STATUS = {
+  todo:    {label:'À faire',  cls:'na'},
+  progress:{label:'En cours', cls:'info'},
+  done:    {label:'Fait',     cls:'good'},
+  na:      {label:'N/A',      cls:'outline'},
+};
+const STATUS_CYCLE = ['todo','progress','done','na'];
+
+/* Référentiel de la checklist d'exploitabilité */
+const TEMPLATE = [
+  {id:'supervision', label:'Supervision & observabilité', team:'noc', items:[
+    'Sondes de disponibilité et de ressources déclarées',
+    'Tableaux de bord opérationnels publiés',
+    'Seuils d’alerte définis et validés',
+    'Alertes routées vers le NOC et l’astreinte',
+    'Journaux applicatifs centralisés',
+  ]},
+  {id:'sauvegarde', label:'Sauvegarde & restauration', team:'sto', items:[
+    'Politique de sauvegarde définie (RPO validé)',
+    'Jobs de sauvegarde planifiés et supervisés',
+    'Test de restauration complet réalisé',
+  ]},
+  {id:'continuite', label:'Continuité & PRA', team:'sys', items:[
+    'Objectifs RTO / RPO validés par le métier',
+    'Scénario de reprise (PRA) documenté',
+    'Test de bascule PRA réalisé (exigé C1/C2)',
+  ]},
+  {id:'securite', label:'Sécurité', team:'sec', items:[
+    'Scan de vulnérabilités sans faille critique',
+    'Durcissement appliqué (référentiel interne)',
+    'Secrets et comptes de service dans le coffre-fort',
+    'Revue des habilitations et des accès effectuée',
+    'Intégration au patch management',
+  ]},
+  {id:'reseau', label:'Réseau & certificats', team:'net', items:[
+    'Entrées DNS créées (interne / externe)',
+    'Certificats TLS déployés, renouvellement automatisé',
+    'Répartition de charge configurée et testée',
+    'Matrice de flux documentée et appliquée au pare-feu',
+  ]},
+  {id:'documentation', label:'Documentation d’exploitation', team:'exp', items:[
+    'DAT (dossier d’architecture technique) validé',
+    'DEX / runbook d’exploitation rédigé',
+    'Procédures d’arrêt et de relance testées',
+    'Consignes N1/N2 et contacts d’escalade publiés',
+  ]},
+  {id:'astreinte', label:'Astreinte & support', team:'exp', items:[
+    'Périmètre intégré au dispositif d’astreinte',
+    'Transfert de compétences N1/N2 réalisé',
+    'Créneaux de maintenance convenus avec le métier',
+  ]},
+  {id:'capacite', label:'Capacité & performance', team:'sys', items:[
+    'Dimensionnement validé (CPU, RAM, stockage, réseau)',
+    'Test de charge représentatif réalisé',
+    'Plan de capacité à 12 mois établi',
+  ]},
+  {id:'referentiels', label:'Référentiels & conformité', team:'exp', items:[
+    'CI enregistrés dans la CMDB avec leurs dépendances',
+    'Licences et contrats de support enregistrés',
+    'Conformité RGPD vérifiée (données personnelles)',
+  ]},
+];
+const catOf = id => TEMPLATE.find(c=>c.id===id) || {id, label:id, team:''};
+
+/* ---------- Utilitaires ---------- */
+
+const $ = s => document.querySelector(s);
+const esc = v => String(v==null?'':v).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const uid = p => (p||'x') + Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+
+function todayISO(){
+  const d=new Date(), p=n=>String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
+}
+const FMT_D = new Intl.DateTimeFormat('fr-FR',{day:'2-digit',month:'short',year:'numeric'});
+const FMT_TS = new Intl.DateTimeFormat('fr-FR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+const fmtD = iso => iso ? FMT_D.format(new Date(iso+'T00:00:00')) : '—';
+const fmtTs = ts => ts ? FMT_TS.format(new Date(ts)) : '';
+const daysTo = iso => Math.round((new Date(iso+'T00:00:00') - new Date(todayISO()+'T00:00:00'))/86400000);
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+
+/* ---------- État & persistance ---------- */
+
+const LS_KEY = 'passerelle-mee:v1';
+let storageOk = true;
+let state = null;
+
+const ui = {
+  q:'', filters:{stage:'',crit:'',status:'',team:''}, sort:'date',
+  catOpen:{}, comments:{}, refocus:null,
+};
+let lastHash = null;
+
+function saveState(){
+  state.updatedAt = new Date().toISOString();
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(state)); storageOk = true; }
+  catch(e){ storageOk = false; }
+}
+function loadState(){
+  try{
+    const raw = localStorage.getItem(LS_KEY);
+    if(raw){ const s = JSON.parse(raw); if(s && Array.isArray(s.platforms)) return s; }
+  }catch(e){ storageOk = false; }
+  return null;
+}
+
+function blankState(){
+  return {
+    version:1, seeded:false, seedBannerHidden:false,
+    settings:{readyThreshold:90},
+    teams:[], platforms:[],
+    createdAt:new Date().toISOString(),
+  };
+}
+
+/* ---------- Modèle ---------- */
+
+function newChecklist(){
+  const out=[];
+  TEMPLATE.forEach(cat=>{
+    cat.items.forEach((label,i)=>{
+      out.push({id:cat.id+'.'+(i+1), cat:cat.id, label, status:'todo', team:cat.team, due:'', comment:''});
+    });
+  });
+  return out;
+}
+
+function newPlatform(fields){
+  return Object.assign({
+    id:uid('p'), name:'', type:TYPES[0], criticality:'C3',
+    owner:'', sponsor:'', targetDate:'', goLiveDate:'', description:'',
+    stage:'cadrage', checklist:newChecklist(), actions:[], journal:[],
+    gonogo:{decision:null, date:'', comment:''},
+    createdAt:new Date().toISOString(),
+  }, fields||{});
+}
+
+function logJ(p, text){
+  p.journal.unshift({ts:new Date().toISOString(), text});
+}
+
+function score(p){
+  let done=0, na=0, total=p.checklist.length;
+  p.checklist.forEach(i=>{ if(i.status==='done') done++; else if(i.status==='na') na++; });
+  const base = total - na;
+  return base<=0 ? 100 : Math.round(done/base*100);
+}
+function catStats(p, catId){
+  const items = p.checklist.filter(i=>i.cat===catId);
+  let done=0, na=0, prog=0;
+  items.forEach(i=>{ if(i.status==='done')done++; else if(i.status==='na')na++; else if(i.status==='progress')prog++; });
+  const base = items.length - na;
+  return {items, done, na, prog, total:items.length, base,
+    pct: base<=0?100:Math.round(done/base*100),
+    complete: base<=0 || done===base};
+}
+const openBlocking = p => p.actions.filter(a=>!a.done && a.blocking);
+const isBlocked = p => openBlocking(p).length>0;
+const isLate = p => !!p.targetDate && stageIdx(p.stage) < stageIdx('mep') && p.targetDate < todayISO();
+const isReady = p => score(p) >= state.settings.readyThreshold && !isBlocked(p) && ['preprod','gonogo'].includes(p.stage);
+
+function platformStatus(p){
+  if(p.stage==='run')  return {label:'En exploitation', cls:'good'};
+  if(isBlocked(p))     return {label:'Bloquée',         cls:'crit'};
+  if(isLate(p))        return {label:'En retard',       cls:'warn'};
+  if(isReady(p))       return {label:'Prête',           cls:'good'};
+  return {label:'En cours', cls:'info'};
+}
+
+const teamName = id => { const t = state.teams.find(t=>t.id===id); return t ? t.name : '—'; };
+
+/* ---------- Données de démonstration ---------- */
+
+function seedTeams(){
+  return [
+    {id:'sys', name:'Systèmes & Cloud',        lead:'Karim Benali',    contact:'dl-systemes@exemple.fr'},
+    {id:'net', name:'Réseau & Télécoms',       lead:'Claire Fontaine', contact:'dl-reseau@exemple.fr'},
+    {id:'sec', name:'Sécurité Opérationnelle', lead:'Mehdi Achour',    contact:'dl-secu-ops@exemple.fr'},
+    {id:'dba', name:'Bases de Données',        lead:'Sophie Lemaire',  contact:'dl-dba@exemple.fr'},
+    {id:'sto', name:'Stockage & Sauvegarde',   lead:'Antoine Perez',   contact:'dl-stockage@exemple.fr'},
+    {id:'noc', name:'Supervision & Pilotage',  lead:'Laura Da Silva',  contact:'dl-noc@exemple.fr'},
+    {id:'exp', name:'Exploitation N1/N2',      lead:'Julien Moreau',   contact:'dl-exploitation@exemple.fr'},
+  ];
+}
+
+function applyProfile(p, frac, seed){
+  const rnd = mulberry32(seed);
+  const n = p.checklist.length;
+  p.checklist.forEach((it,i)=>{
+    const pos = i/n, r = rnd();
+    if(pos < frac)            it.status = r<0.08 ? 'na' : 'done';
+    else if(pos < frac+0.14)  it.status = r<0.5 ? 'progress' : 'todo';
+    else                      it.status = 'todo';
+  });
+}
+
+function buildSeed(){
+  const s = blankState();
+  s.seeded = true;
+  s.teams = seedTeams();
+  const P = [];
+
+  let p = newPlatform({id:'p-kaas', name:'KaaS — Kubernetes interne', type:'Infrastructure', criticality:'C1',
+    owner:'Karim Benali', sponsor:'Direction Technique', targetDate:'2026-09-22', stage:'preprod',
+    description:'Offre Kubernetes managée interne pour les équipes de développement : clusters mutualisés, ingress standardisé, observabilité intégrée.'});
+  applyProfile(p, 0.80, 11);
+  p.checklist.find(i=>i.id==='continuite.3').status='todo';
+  p.checklist.find(i=>i.id==='continuite.3').comment='Créneau de bascule à convenir avec le métier.';
+  p.checklist.find(i=>i.id==='astreinte.2').status='progress';
+  p.actions = [
+    {id:'a1', label:'Planifier le test de bascule PRA avec le métier', due:'2026-09-05', blocking:true,  done:false},
+    {id:'a2', label:'Compléter les consignes N1 (redémarrage des nœuds)', due:'2026-08-14', blocking:false, done:true},
+  ];
+  p.journal = [
+    {ts:'2026-08-12T09:30:00', text:'Passage en pré-production validé en comité d’architecture.'},
+    {ts:'2026-07-28T14:10:00', text:'Recette technique terminée : 2 réserves mineures levées.'},
+  ];
+  P.push(p);
+
+  p = newPlatform({id:'p-datalake', name:'Datalake v2 — Trino / Iceberg', type:'Data', criticality:'C2',
+    owner:'Sophie Lemaire', sponsor:'Direction Data', targetDate:'2026-08-10', stage:'build',
+    description:'Nouvelle plateforme d’analyse : moteur Trino sur tables Iceberg, remplacement du datalake historique.'});
+  applyProfile(p, 0.38, 22);
+  p.actions = [
+    {id:'a1', label:'Livrer la matrice de flux à l’équipe réseau', due:'2026-08-08', blocking:false, done:false},
+    {id:'a2', label:'Recaler la date cible avec la Direction Data', due:'2026-08-22', blocking:false, done:false},
+  ];
+  p.journal = [
+    {ts:'2026-08-05T11:00:00', text:'Retard signalé : dimensionnement des workers à revoir, la date cible du 10/08 ne sera pas tenue.'},
+  ];
+  P.push(p);
+
+  p = newPlatform({id:'p-apigw', name:'Passerelle d’API — Kong', type:'Middleware', criticality:'C1',
+    owner:'Claire Fontaine', sponsor:'Direction du Digital', targetDate:'2026-08-28', stage:'gonogo',
+    description:'Point d’entrée unique des API internes et partenaires : authentification, quotas, journalisation.'});
+  applyProfile(p, 0.97, 33);
+  p.checklist.forEach(i=>{ if(i.status==='progress'||i.status==='todo') i.status='done'; });
+  p.checklist.find(i=>i.id==='capacite.3').status='progress';
+  p.journal = [
+    {ts:'2026-08-17T10:00:00', text:'Revue Go/No-Go planifiée le 26/08 avec la Direction du Digital.'},
+    {ts:'2026-08-11T16:40:00', text:'Test de charge validé : 12 000 req/s en pointe, marge de 40 %.'},
+  ];
+  P.push(p);
+
+  p = newPlatform({id:'p-supng', name:'Supervision NG — Grafana / Mimir', type:'Infrastructure', criticality:'C2',
+    owner:'Laura Da Silva', sponsor:'Direction Infrastructures & Production', targetDate:'2026-10-15', stage:'recette',
+    description:'Refonte de la chaîne de supervision : métriques longue durée, alerting unifié, tableaux de bord standardisés.'});
+  applyProfile(p, 0.52, 44);
+  p.journal = [
+    {ts:'2026-08-03T09:15:00', text:'Début de la recette technique sur l’environnement de qualification.'},
+  ];
+  P.push(p);
+
+  p = newPlatform({id:'p-bastion', name:'Bastion PAM — accès administrateurs', type:'Sécurité', criticality:'C1',
+    owner:'Mehdi Achour', sponsor:'RSSI', targetDate:'2026-08-20', goLiveDate:'2026-08-18', stage:'mep',
+    description:'Bastion d’administration à privilèges : enregistrement des sessions, coffre-fort de comptes, rupture protocolaire.'});
+  applyProfile(p, 0.93, 55);
+  p.gonogo = {decision:'go_reserves', date:'2026-08-12', comment:'Go prononcé avec réserve : le test de restauration complet doit être rejoué avant la fin de la VSR.'};
+  p.actions = [
+    {id:'a1', label:'Rejouer le test de restauration complet', due:'2026-09-01', blocking:true, done:false},
+  ];
+  p.journal = [
+    {ts:'2026-08-18T08:05:00', text:'Mise en production réalisée, bascule des accès administrateurs engagée.'},
+    {ts:'2026-08-12T15:00:00', text:'Décision Go avec réserves prononcée en revue.'},
+  ];
+  P.push(p);
+
+  p = newPlatform({id:'p-runners', name:'Runners CI mutualisés — GitLab', type:'Plateforme interne', criticality:'C3',
+    owner:'Julien Moreau', sponsor:'Direction des Études', targetDate:'2026-11-30', stage:'cadrage',
+    description:'Ferme de runners CI/CD mutualisée : isolation par namespace, autoscaling, images durcies.'});
+  applyProfile(p, 0.05, 66);
+  P.push(p);
+
+  p = newPlatform({id:'p-statut', name:'Portail de statut interne', type:'Application', criticality:'C4',
+    owner:'Laura Da Silva', sponsor:'Direction Infrastructures & Production', targetDate:'2026-06-15', goLiveDate:'2026-06-17', stage:'run',
+    description:'Page de statut des services internes alimentée par la supervision, à destination des équipes métier.'});
+  applyProfile(p, 1, 77);
+  p.gonogo = {decision:'go', date:'2026-06-16', comment:'Aucune réserve.'};
+  p.journal = [
+    {ts:'2026-07-01T10:00:00', text:'Fin de VSR : plateforme remise à l’exploitation nominale.'},
+    {ts:'2026-06-17T09:00:00', text:'Mise en production réalisée.'},
+  ];
+  P.push(p);
+
+  s.platforms = P;
+  return s;
+}
+
+/* ---------- Icônes ---------- */
+
+const ICONS = {
+  dash:'<rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/>',
+  list:'<path d="M8.5 6h12.5M8.5 12h12.5M8.5 18h12.5"/><circle cx="4" cy="6" r="1.2"/><circle cx="4" cy="12" r="1.2"/><circle cx="4" cy="18" r="1.2"/>',
+  kanban:'<rect x="3" y="4" width="5" height="16" rx="1.4"/><rect x="9.5" y="4" width="5" height="10" rx="1.4"/><rect x="16" y="4" width="5" height="13" rx="1.4"/>',
+  users:'<circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19.5c.8-3.2 2.9-4.8 5.5-4.8s4.7 1.6 5.5 4.8"/><circle cx="17" cy="9.5" r="2.5"/><path d="M16 14.9c2.4.1 4 1.6 4.7 4.3"/>',
+  gear:'<circle cx="12" cy="12" r="3.1"/><path d="M12 2.5v2.8M12 18.7v2.8M2.5 12h2.8M18.7 12h2.8M5.2 5.2l2 2M16.8 16.8l2 2M18.8 5.2l-2 2M7.2 16.8l-2 2"/>',
+  plus:'<path d="M12 5v14M5 12h14"/>',
+  search:'<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
+  back:'<path d="M14.5 5.5 8 12l6.5 6.5"/>',
+  chev:'<path d="M9 6l6 6-6 6"/>',
+  print:'<path d="M7 8V3.5h10V8M7 17H4.5v-6.5h15V17H17"/><rect x="7" y="14.5" width="10" height="6"/>',
+  down:'<path d="M12 3.5v12M7 11l5 5 5-5M4.5 20h15"/>',
+  copy:'<rect x="9" y="9" width="11" height="11" rx="1.6"/><path d="M5 14.5H4a1.5 1.5 0 0 1-1.5-1.5V4A1.5 1.5 0 0 1 4 2.5h9A1.5 1.5 0 0 1 14.5 4v1"/>',
+  trash:'<path d="M4 6.5h16M9.5 6V4h5v2M6 6.5 7 20h10l1-13.5M10 10.5v6M14 10.5v6"/>',
+  pen:'<path d="M4 20l4.2-1L20 7.2 16.8 4 5 15.8 4 20z"/>',
+  note:'<path d="M5 4.5h14v11l-4 4H5v-15zM15 19.5v-4h4"/>',
+  arr:'<path d="M5 12h14M13 6l6 6-6 6"/>',
+};
+const icon = n => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(ICONS[n]||'')+'</svg>';
+
+/* ---------- Fragments communs ---------- */
+
+const chip = (label, cls) => '<span class="chip '+cls+'">'+esc(label)+'</span>';
+const critChip = c => chip(CRITICITY[c] ? CRITICITY[c].label : c, CRITICITY[c] ? CRITICITY[c].cls : 'na');
+const statusChip = p => { const st=platformStatus(p); return chip(st.label, st.cls); };
+const miniBar = (pct, ok) => '<span class="mini-bar"><span class="mini-fill'+(ok?' ok':'')+'" style="width:'+pct+'%"></span></span><span class="pct">'+pct+'&nbsp;%</span>';
+
+function dateCell(p){
+  if(!p.targetDate) return '<span class="muted">—</span>';
+  const d = daysTo(p.targetDate);
+  const late = isLate(p);
+  const suffix = p.stage==='run' || stageIdx(p.stage)>=stageIdx('mep') ? '' :
+    ' <span class="dchip'+(late?' late':'')+'">'+(late ? 'retard '+Math.abs(d)+' j' : 'J−'+d)+'</span>';
+  return '<span class="mono tiny">'+fmtD(p.targetDate)+'</span>'+suffix;
+}
+
+function teamOptions(sel){
+  let out = '<option value="">—</option>';
+  state.teams.forEach(t=>{ out += '<option value="'+esc(t.id)+'"'+(t.id===sel?' selected':'')+'>'+esc(t.name)+'</option>'; });
+  return out;
+}
+
+function seedBanner(){
+  if(!state.seeded || state.seedBannerHidden) return '';
+  return '<div class="banner">'+
+    '<span><strong>Données de démonstration.</strong> Explorez librement, puis créez vos plateformes ou repartez de zéro.</span>'+
+    '<span class="spacer"></span>'+
+    '<button class="btn btn-s" data-action="wipe-all">Repartir de zéro</button>'+
+    '<button class="btn btn-s btn-ghost" data-action="hide-seed-banner">Masquer</button>'+
+  '</div>';
+}
+
+function storageBanner(){
+  if(storageOk) return '';
+  return '<div class="banner" style="background:var(--warn-bg); color:var(--warn); border-color:var(--warn-bg)">'+
+    '<span><strong>Stockage local indisponible.</strong> Les données vivent en mémoire : exportez le JSON avant de fermer la page.</span>'+
+  '</div>';
+}
+
+/* ---------- Vue : tableau de bord ---------- */
+
+function vDashboard(){
+  const ps = state.platforms;
+  const active = ps.filter(p=>p.stage!=='run');
+  const ready = active.filter(isReady);
+  const blocked = ps.filter(isBlocked);
+  const late = active.filter(isLate);
+  const inRun = ps.filter(p=>p.stage==='run');
+
+  let html = '<div class="topbar"><div><h1>Tableau de bord</h1>'+
+    '<p class="sub">Direction Infrastructures &amp; Production · '+ps.length+' plateforme'+(ps.length>1?'s':'')+' suivie'+(ps.length>1?'s':'')+'</p></div>'+
+    '<div class="topbar-actions"><button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button></div></div>';
+  html += storageBanner() + seedBanner();
+
+  if(!ps.length) return html + emptyState();
+
+  html += '<div class="tiles">'+
+    tile('En cours', active.length, 'mises en exploitation actives', '')+
+    tile('Prêtes', ready.length, 'seuil ≥ '+state.settings.readyThreshold+' % atteint', ready.length?'good':'')+
+    tile('Bloquées', blocked.length, 'action bloquante ouverte', blocked.length?'crit':'')+
+    tile('En retard', late.length, 'date cible dépassée', late.length?'warn':'')+
+    tile('En exploitation', inRun.length, 'remises au run', '')+
+  '</div>';
+
+  html += '<div class="dash-grid"><div class="dash-col">';
+
+  /* À traiter */
+  const alerts = [];
+  ps.forEach(p=>{
+    openBlocking(p).forEach(a=>{
+      const overdue = a.due && a.due < todayISO();
+      alerts.push({sev:overdue?'crit':'warn', pid:p.id,
+        t:'Action bloquante — '+a.label,
+        s:p.name + (a.due ? ' · échéance '+fmtD(a.due)+(overdue?' (dépassée)':'') : '')});
+    });
+  });
+  late.forEach(p=>alerts.push({sev:'warn', pid:p.id, t:'Date cible dépassée', s:p.name+' · cible '+fmtD(p.targetDate)}));
+  ps.filter(p=>p.stage==='gonogo' && !p.gonogo.decision).forEach(p=>
+    alerts.push({sev:'info', pid:p.id, t:'Revue Go/No-Go à tenir', s:p.name+' · préparation '+score(p)+' %'}));
+
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">À traiter</h2>'+
+    (alerts.length?'<span class="chip '+(alerts.some(a=>a.sev==='crit')?'crit':'warn')+'">'+alerts.length+'</span>':'')+'</div>';
+  html += alerts.length
+    ? '<div class="rows">'+alerts.map(a=>'<div class="row-item" data-nav="#/plateforme/'+esc(a.pid)+'">'+
+        '<span class="alert-dot '+a.sev+'"></span><div class="row-main"><div class="row-title">'+esc(a.t)+'</div>'+
+        '<div class="row-sub">'+esc(a.s)+'</div></div>'+icon('chev')+'</div>').join('')+'</div>'
+    : '<p class="empty-note">Rien à signaler : aucune action bloquante ni retard.</p>';
+  html += '</div>';
+
+  /* Prochaines mises en production */
+  const next = active.filter(p=>p.targetDate).sort((a,b)=>a.targetDate<b.targetDate?-1:1).slice(0,6);
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Prochaines mises en production</h2></div>';
+  html += next.length
+    ? '<div class="rows">'+next.map(p=>{
+        const d = daysTo(p.targetDate);
+        return '<div class="row-item" data-nav="#/plateforme/'+esc(p.id)+'">'+
+          '<div class="row-main"><div class="row-title">'+esc(p.name)+'</div>'+
+          '<div class="row-sub">'+esc(stageLabel(p.stage))+' · '+esc(p.owner||'—')+'</div></div>'+
+          '<span class="row-metrics">'+miniBar(score(p), score(p)>=state.settings.readyThreshold)+
+          '<span class="dchip'+(isLate(p)?' late':'')+'">'+(isLate(p)?'retard '+Math.abs(d)+' j':'J−'+d)+'</span>'+
+          '<span class="mono tiny muted">'+fmtD(p.targetDate)+'</span></span></div>';
+      }).join('')+'</div>'
+    : '<p class="empty-note">Aucune date cible renseignée.</p>';
+  html += '</div>';
+
+  html += '</div><div class="dash-col">';
+
+  /* Répartition par étape */
+  const counts = STAGES.map(s=>({s, n: ps.filter(p=>p.stage===s.id).length}));
+  const max = Math.max(1, ...counts.map(c=>c.n));
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Pipeline par étape</h2></div><div class="card-pad bars">'+
+    counts.map(c=>'<div class="bar-row'+(c.n?'':' zero')+'"><span class="bar-label">'+esc(c.s.label)+'</span>'+
+      '<span class="bar-track"><span class="bar-fill" style="width:'+(c.n/max*100)+'%"></span></span>'+
+      '<span class="bar-val">'+c.n+'</span></div>').join('')+
+  '</div></div>';
+
+  /* Charge par équipe */
+  const load = {};
+  state.teams.forEach(t=>load[t.id]=0);
+  active.forEach(p=>p.checklist.forEach(i=>{
+    if((i.status==='todo'||i.status==='progress') && load[i.team]!=null) load[i.team]++;
+  }));
+  const rows = state.teams.map(t=>({t, n:load[t.id]||0})).sort((a,b)=>b.n-a.n);
+  const lmax = Math.max(1, ...rows.map(r=>r.n));
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Reste à faire par équipe</h2></div><div class="card-pad bars">'+
+    (rows.length ? rows.map(r=>'<div class="bar-row'+(r.n?'':' zero')+'"><span class="bar-label">'+esc(r.t.name)+'</span>'+
+      '<span class="bar-track"><span class="bar-fill" style="width:'+(r.n/lmax*100)+'%"></span></span>'+
+      '<span class="bar-val">'+r.n+'</span></div>').join('')
+    : '<p class="muted tiny">Aucune équipe déclarée.</p>')+
+    '<p class="tiny muted" style="margin-top:6px">Éléments de checklist à faire ou en cours, plateformes actives.</p>'+
+  '</div></div>';
+
+  html += '</div></div>';
+  return html;
+}
+
+function tile(label, n, ctx, cls){
+  return '<div class="tile"><div class="t-label">'+esc(label)+'</div>'+
+    '<div class="t-num '+cls+'">'+n+'</div><div class="t-ctx">'+esc(ctx)+'</div></div>';
+}
+
+function emptyState(){
+  return '<div class="card empty"><h2>Aucune plateforme suivie</h2>'+
+    '<p>Créez votre première fiche de mise en exploitation, ou chargez le jeu de démonstration pour découvrir l’outil.</p>'+
+    '<button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button>'+
+    '<button class="btn" data-action="load-demo">Charger la démonstration</button></div>';
+}
+
+/* ---------- Vue : liste des plateformes ---------- */
+
+function filteredPlatforms(){
+  let ps = state.platforms.slice();
+  const q = ui.q.trim().toLowerCase();
+  if(q) ps = ps.filter(p=>(p.name+' '+p.owner+' '+p.sponsor+' '+p.type).toLowerCase().includes(q));
+  const f = ui.filters;
+  if(f.stage) ps = ps.filter(p=>p.stage===f.stage);
+  if(f.crit)  ps = ps.filter(p=>p.criticality===f.crit);
+  if(f.team)  ps = ps.filter(p=>p.checklist.some(i=>i.team===f.team && i.status!=='done' && i.status!=='na'));
+  if(f.status){
+    ps = ps.filter(p=>{
+      if(f.status==='late') return isLate(p);
+      if(f.status==='blocked') return isBlocked(p);
+      if(f.status==='ready') return isReady(p);
+      if(f.status==='run') return p.stage==='run';
+      if(f.status==='wip') return p.stage!=='run' && !isReady(p) && !isBlocked(p) && !isLate(p);
+      return true;
+    });
+  }
+  const sorts = {
+    date:(a,b)=>(a.targetDate||'9999')<(b.targetDate||'9999')?-1:1,
+    score:(a,b)=>score(b)-score(a),
+    name:(a,b)=>a.name.localeCompare(b.name,'fr'),
+    crit:(a,b)=>a.criticality.localeCompare(b.criticality),
+    stage:(a,b)=>stageIdx(a.stage)-stageIdx(b.stage),
+  };
+  ps.sort(sorts[ui.sort]||sorts.date);
+  return ps;
+}
+
+function vList(){
+  const ps = filteredPlatforms();
+  let html = '<div class="topbar"><div><h1>Plateformes</h1>'+
+    '<p class="sub">'+ps.length+' résultat'+(ps.length>1?'s':'')+' sur '+state.platforms.length+'</p></div>'+
+    '<div class="topbar-actions"><button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button></div></div>';
+  html += storageBanner() + seedBanner();
+
+  html += '<div class="filters">'+
+    '<div class="field"><label for="f-search">Recherche</label><span class="search-box">'+icon('search')+
+      '<input id="f-search" type="search" placeholder="Nom, porteur, type…" value="'+esc(ui.q)+'" data-input="search"></span></div>'+
+    '<div class="field"><label for="f-stage">Étape</label><select id="f-stage" data-change="filter" data-k="stage">'+
+      '<option value="">Toutes</option>'+STAGES.map(s=>'<option value="'+s.id+'"'+(ui.filters.stage===s.id?' selected':'')+'>'+esc(s.label)+'</option>').join('')+'</select></div>'+
+    '<div class="field"><label for="f-crit">Criticité</label><select id="f-crit" data-change="filter" data-k="crit">'+
+      '<option value="">Toutes</option>'+Object.keys(CRITICITY).map(c=>'<option value="'+c+'"'+(ui.filters.crit===c?' selected':'')+'>'+esc(CRITICITY[c].label)+'</option>').join('')+'</select></div>'+
+    '<div class="field"><label for="f-status">Statut</label><select id="f-status" data-change="filter" data-k="status">'+
+      '<option value="">Tous</option>'+
+      [['ready','Prête'],['blocked','Bloquée'],['late','En retard'],['wip','En cours'],['run','En exploitation']]
+        .map(o=>'<option value="'+o[0]+'"'+(ui.filters.status===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+'</select></div>'+
+    '<div class="field"><label for="f-team">Équipe (reste à faire)</label><select id="f-team" data-change="filter" data-k="team">'+
+      '<option value="">Toutes</option>'+state.teams.map(t=>'<option value="'+esc(t.id)+'"'+(ui.filters.team===t.id?' selected':'')+'>'+esc(t.name)+'</option>').join('')+'</select></div>'+
+    '<div class="field"><label for="f-sort">Tri</label><select id="f-sort" data-change="sort">'+
+      [['date','Date cible'],['score','Préparation'],['name','Nom'],['crit','Criticité'],['stage','Étape']]
+        .map(o=>'<option value="'+o[0]+'"'+(ui.sort===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+'</select></div>'+
+  '</div>';
+
+  if(!state.platforms.length) return html + emptyState();
+
+  html += '<div class="table-wrap"><table class="plist"><thead><tr>'+
+    '<th>Plateforme</th><th>Étape</th><th>Criticité</th><th>Préparation</th><th>Porteur</th><th>Date cible</th><th>Statut</th>'+
+    '</tr></thead><tbody>'+
+    (ps.length ? ps.map(p=>{
+      const sc = score(p);
+      return '<tr data-nav="#/plateforme/'+esc(p.id)+'">'+
+        '<td><div class="p-name">'+esc(p.name)+'</div><div class="p-type">'+esc(p.type)+'</div></td>'+
+        '<td>'+chip(stageLabel(p.stage),'stage')+'</td>'+
+        '<td>'+critChip(p.criticality)+'</td>'+
+        '<td>'+miniBar(sc, sc>=state.settings.readyThreshold)+'</td>'+
+        '<td>'+esc(p.owner||'—')+'</td>'+
+        '<td>'+dateCell(p)+'</td>'+
+        '<td>'+statusChip(p)+'</td></tr>';
+    }).join('') : '<tr><td colspan="7"><p class="empty-note">Aucune plateforme ne correspond aux filtres.</p></td></tr>')+
+  '</tbody></table></div>';
+  return html;
+}
+
+/* ---------- Vue : pipeline (kanban) ---------- */
+
+function vKanban(){
+  let html = '<div class="topbar"><div><h1>Pipeline</h1>'+
+    '<p class="sub">Glissez une carte pour changer d’étape</p></div>'+
+    '<div class="topbar-actions"><button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button></div></div>';
+  html += storageBanner() + seedBanner();
+  if(!state.platforms.length) return html + emptyState();
+
+  html += '<div class="kanban">'+STAGES.map(s=>{
+    const cards = state.platforms.filter(p=>p.stage===s.id);
+    return '<div class="kcol" data-drop="'+s.id+'"><div class="kcol-head"><span>'+esc(s.label)+'</span>'+
+      '<span class="kcount">'+cards.length+'</span></div><div class="kcards">'+
+      cards.map(p=>{
+        const sc = score(p), st = platformStatus(p);
+        return '<div class="kcard" draggable="true" data-drag="'+esc(p.id)+'" data-nav="#/plateforme/'+esc(p.id)+'">'+
+          '<div class="k-title">'+esc(p.name)+'</div>'+
+          '<div class="k-meta">'+critChip(p.criticality)+(st.label!=='En cours'?chip(st.label,st.cls):'')+'</div>'+
+          '<span class="mini-bar" style="width:100%"><span class="mini-fill'+(sc>=state.settings.readyThreshold?' ok':'')+'" style="width:'+sc+'%"></span></span>'+
+          '<div class="k-foot"><span>'+esc(p.owner||'—')+'</span><span class="mono">'+(p.targetDate?fmtD(p.targetDate):'')+'</span></div>'+
+        '</div>';
+      }).join('')+
+    '</div></div>';
+  }).join('')+'</div>';
+  return html;
+}
+
+/* ---------- Vue : fiche plateforme ---------- */
+
+function vDetail(id){
+  const p = state.platforms.find(x=>x.id===id);
+  if(!p) return '<div class="topbar"><h1>Introuvable</h1></div><div class="card card-pad"><p class="muted">Cette plateforme n’existe plus. <a href="#/plateformes">Retour à la liste</a>.</p></div>';
+
+  const sc = score(p);
+  const blocking = openBlocking(p);
+  const idx = stageIdx(p.stage);
+
+  let html = '<a class="backlink" href="#/plateformes">'+icon('back')+'Toutes les plateformes</a>';
+  html += storageBanner();
+
+  /* En-tête */
+  html += '<div class="card det-head"><div class="det-title-row"><div>'+
+    '<h1>'+esc(p.name)+'</h1>'+
+    '<div class="det-chips">'+chip(stageLabel(p.stage),'stage')+critChip(p.criticality)+statusChip(p)+chip(esc(p.type),'outline')+'</div>'+
+    '</div><div class="topbar-actions">'+
+    (idx<STAGES.length-1?'<button class="btn" data-action="next-stage" data-id="'+esc(p.id)+'">Étape suivante '+icon('arr')+'</button>':'')+
+    '<button class="btn" data-action="print-page">'+icon('print')+'Imprimer la fiche</button>'+
+    '<button class="btn" data-action="edit-platform" data-id="'+esc(p.id)+'">'+icon('pen')+'Modifier</button>'+
+    '</div></div>'+
+    '<div class="meta-grid">'+
+      meta('Porteur MEE', p.owner)+meta('Demandeur', p.sponsor)+
+      meta('Date cible', p.targetDate?fmtD(p.targetDate):'')+
+      meta('MEP réelle', p.goLiveDate?fmtD(p.goLiveDate):'')+
+      meta('Créée le', fmtD(p.createdAt.slice(0,10)))+
+    '</div>'+
+    (p.description?'<p class="desc">'+esc(p.description)+'</p>':'')+
+    '<div class="stepper" role="group" aria-label="Étapes">'+STAGES.map((s,i)=>{
+      const cls = i<idx?'done':(i===idx?'current':'');
+      return '<button class="step '+cls+'" data-action="set-stage" data-id="'+esc(p.id)+'" data-stage="'+s.id+'" title="Passer à : '+esc(s.label)+'">'+
+        '<span class="n">'+(i<idx?'✓':i+1)+'</span>'+esc(s.label)+'</button>';
+    }).join('')+'</div>'+
+  '</div>';
+
+  html += '<div class="det-grid"><div class="det-col">';
+
+  /* Checklist */
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Checklist d’exploitabilité</h2>'+
+    '<span class="cat-count">'+p.checklist.filter(i=>i.status==='done').length+' / '+p.checklist.length+'</span></div>';
+  TEMPLATE.forEach(cat=>{
+    const stats = catStats(p, cat.id);
+    if(!stats.total) return;
+    const key = p.id+':'+cat.id;
+    const open = ui.catOpen[key]!=null ? ui.catOpen[key] : !stats.complete;
+    html += '<div class="cat'+(open?' open':'')+'">'+
+      '<button class="cat-head" data-action="toggle-cat" data-key="'+esc(key)+'" aria-expanded="'+open+'">'+
+        icon('chev').replace('<svg','<svg class="cat-chevron"')+
+        '<span class="cat-name">'+esc(cat.label)+'</span>'+
+        '<span class="cat-team">'+esc(teamName(cat.team))+'</span>'+
+        '<span class="cat-bar"><i class="'+(stats.complete?'ok':'')+'" style="width:'+stats.pct+'%"></i></span>'+
+        '<span class="cat-count">'+stats.done+'/'+stats.base+(stats.na?' <span class="muted">(+'+stats.na+' n/a)</span>':'')+'</span>'+
+      '</button>';
+    if(open){
+      html += '<div class="cat-body">'+stats.items.map(it=>{
+        const st = ITEM_STATUS[it.status];
+        const comOpen = ui.comments[p.id+':'+it.id] || false;
+        return '<div class="item">'+
+          '<button class="chip st '+st.cls+'" data-action="cycle-item" data-id="'+esc(p.id)+'" data-item="'+esc(it.id)+'" title="Changer l’état">'+st.label+'</button>'+
+          '<span class="i-label '+(it.status==='done'?'done':it.status==='na'?'na':'')+'">'+esc(it.label)+'</span>'+
+          '<span class="i-owner"><select class="sel-s" data-change="item-team" data-id="'+esc(p.id)+'" data-item="'+esc(it.id)+'" aria-label="Équipe responsable">'+teamOptions(it.team)+'</select></span>'+
+          '<span class="i-due"><input class="inp-s" type="date" value="'+esc(it.due)+'" data-change="item-due" data-id="'+esc(p.id)+'" data-item="'+esc(it.id)+'" aria-label="Échéance"></span>'+
+          '<button class="icon-btn'+(it.comment?' has-com':'')+'" data-action="toggle-comment" data-key="'+esc(p.id+':'+it.id)+'" title="Commentaire" aria-label="Commentaire">'+icon('note')+'</button>'+
+          (comOpen?'<div class="com-row"><textarea data-change="item-comment" data-id="'+esc(p.id)+'" data-item="'+esc(it.id)+'" placeholder="Commentaire…">'+esc(it.comment)+'</textarea></div>':
+            (it.comment?'<div class="com-row tiny muted" style="padding-left:2px">'+esc(it.comment)+'</div>':''))+
+        '</div>';
+      }).join('')+
+      '<div class="cat-foot"><button class="btn btn-s btn-ghost" data-action="add-item" data-id="'+esc(p.id)+'" data-cat="'+esc(cat.id)+'">'+icon('plus')+'Ajouter un élément</button></div>'+
+      '</div>';
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+
+  /* Actions */
+  const acts = p.actions.slice().sort((a,b)=>(a.done?1:0)-(b.done?1:0));
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Actions & réserves</h2>'+
+    '<button class="btn btn-s" data-action="add-action" data-id="'+esc(p.id)+'">'+icon('plus')+'Ajouter</button></div>';
+  html += acts.length ? acts.map(a=>{
+    const overdue = !a.done && a.due && a.due<todayISO();
+    return '<div class="act-row">'+
+      '<input type="checkbox" class="act-chk" '+(a.done?'checked':'')+' data-change="toggle-action" data-id="'+esc(p.id)+'" data-act="'+esc(a.id)+'" aria-label="Action faite">'+
+      '<span class="act-label'+(a.done?' done':'')+'">'+esc(a.label)+'</span>'+
+      (a.blocking && !a.done ? chip('Bloquante','crit') : '')+
+      '<span class="act-meta">'+(a.due?'<span class="'+(overdue?'late':'')+'">'+fmtD(a.due)+'</span>':'')+'</span>'+
+      '<button class="icon-btn" data-action="del-action" data-id="'+esc(p.id)+'" data-act="'+esc(a.id)+'" title="Supprimer" aria-label="Supprimer l’action">'+icon('trash')+'</button>'+
+    '</div>';
+  }).join('') : '<p class="empty-note">Aucune action. Ajoutez ici les réserves et travaux restants.</p>';
+  html += '</div>';
+
+  /* Journal */
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Journal</h2></div>'+
+    '<form class="note-form" data-submit="add-note" data-id="'+esc(p.id)+'">'+
+      '<input name="note" placeholder="Ajouter une note au journal…" autocomplete="off">'+
+      '<button class="btn" type="submit">Noter</button></form>'+
+    (p.journal.length ? p.journal.map(j=>'<div class="j-row"><span class="j-ts">'+esc(fmtTs(j.ts))+'</span><span>'+esc(j.text)+'</span></div>').join('')
+      : '<p class="empty-note">Journal vide.</p>')+
+  '</div>';
+
+  html += '</div><div class="det-col">';
+
+  /* Préparation */
+  const C = 2*Math.PI*34, dash = C*sc/100;
+  const ringCol = sc>=state.settings.readyThreshold ? 'var(--good)' : 'var(--accent)';
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Préparation</h2></div>'+
+    '<div class="ring-wrap"><svg class="ring" width="92" height="92" viewBox="0 0 80 80" role="img" aria-label="Préparation '+sc+' %">'+
+      '<circle cx="40" cy="40" r="34" fill="none" stroke="var(--surface3)" stroke-width="8"/>'+
+      '<circle cx="40" cy="40" r="34" fill="none" stroke="'+ringCol+'" stroke-width="8" stroke-linecap="round" stroke-dasharray="'+dash.toFixed(1)+' '+C.toFixed(1)+'" transform="rotate(-90 40 40)"/>'+
+      '<text class="ring-num" x="40" y="46" text-anchor="middle">'+sc+'%</text></svg>'+
+    '<div class="ring-cap"><div class="big">'+(sc>=state.settings.readyThreshold?'Seuil atteint':'Seuil : '+state.settings.readyThreshold+' %')+'</div>'+
+    '<div class="tiny">'+p.checklist.filter(i=>i.status==='done').length+' faits · '+
+      p.checklist.filter(i=>i.status==='progress').length+' en cours · '+
+      p.checklist.filter(i=>i.status==='todo').length+' à faire</div></div></div>'+
+    '<div class="gates">'+TEMPLATE.map(cat=>{
+      const s2 = catStats(p, cat.id);
+      if(!s2.total) return '';
+      const cls = s2.complete?'ok':(s2.done||s2.prog?'part':'');
+      return '<div class="gate"><span class="gate-dot '+cls+'"></span>'+esc(cat.label)+'<span class="gp">'+s2.pct+' %</span></div>';
+    }).join('')+'</div></div>';
+
+  /* Go / No-Go */
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Go / No-Go</h2></div><div class="gng-body">';
+  if(blocking.length){
+    html += '<p class="gng-warn">'+blocking.length+' action'+(blocking.length>1?'s':'')+' bloquante'+(blocking.length>1?'s':'')+' ouverte'+(blocking.length>1?'s':'')+'.</p>';
+  }
+  if(p.gonogo.decision){
+    const lbl = {go:'GO', go_reserves:'GO avec réserves', nogo:'NO-GO'}[p.gonogo.decision];
+    const cls = {go:'good', go_reserves:'warn', nogo:'crit'}[p.gonogo.decision];
+    html += '<div class="gng-decided"><div>'+chip(lbl,cls)+' <span class="d-date">'+fmtD(p.gonogo.date)+'</span></div>'+
+      (p.gonogo.comment?'<div class="d-com">'+esc(p.gonogo.comment)+'</div>':'')+
+      '<div style="margin-top:8px"><button class="btn btn-s btn-ghost" data-action="clear-decision" data-id="'+esc(p.id)+'">Annuler la décision</button></div></div>';
+  } else {
+    html += '<textarea id="gng-comment" placeholder="Commentaire de la revue (réserves, conditions…)" style="min-height:56px"></textarea>'+
+      '<div class="gng-btns">'+
+      '<button class="btn btn-go" data-action="decide" data-id="'+esc(p.id)+'" data-d="go">Go</button>'+
+      '<button class="btn" data-action="decide" data-id="'+esc(p.id)+'" data-d="go_reserves">Go avec réserves</button>'+
+      '<button class="btn btn-nogo" data-action="decide" data-id="'+esc(p.id)+'" data-d="nogo">No-Go</button></div>'+
+      '<p class="tiny muted">Un Go bascule la plateforme à l’étape « Mise en production ».</p>';
+  }
+  html += '</div></div>';
+
+  html += '</div></div>';
+  return html;
+}
+
+const meta = (label, val) => '<div class="meta-item"><div class="m-label">'+esc(label)+'</div><div class="m-val">'+(val?esc(val):'<span class="muted">—</span>')+'</div></div>';
+
+/* ---------- Vue : équipes ---------- */
+
+function vTeams(){
+  let html = '<div class="topbar"><div><h1>Équipes</h1>'+
+    '<p class="sub">Responsables des chantiers de la checklist</p></div>'+
+    '<div class="topbar-actions"><button class="btn btn-primary" data-action="new-team">'+icon('plus')+'Nouvelle équipe</button></div></div>';
+  html += storageBanner() + seedBanner();
+
+  const active = state.platforms.filter(p=>p.stage!=='run');
+  html += '<div class="team-grid">'+state.teams.map(t=>{
+    let open=0; active.forEach(p=>p.checklist.forEach(i=>{ if(i.team===t.id && (i.status==='todo'||i.status==='progress')) open++; }));
+    return '<div class="card team-card"><div class="team-name">'+esc(t.name)+'</div>'+
+      '<div class="team-meta">'+esc(t.lead||'—')+(t.contact?' · <span class="mono tiny">'+esc(t.contact)+'</span>':'')+'</div>'+
+      '<div class="team-load">'+open+' élément'+(open>1?'s':'')+' de checklist en attente</div>'+
+      '<div class="team-foot"><button class="btn btn-s" data-action="edit-team" data-id="'+esc(t.id)+'">'+icon('pen')+'Modifier</button></div>'+
+    '</div>';
+  }).join('')+'</div>';
+  if(!state.teams.length) html += '<div class="card empty"><h2>Aucune équipe</h2><p>Déclarez vos équipes pour les affecter aux éléments de checklist.</p><button class="btn btn-primary" data-action="new-team">'+icon('plus')+'Nouvelle équipe</button></div>';
+  return html;
+}
+
+/* ---------- Vue : paramètres ---------- */
+
+function vSettings(){
+  let html = '<div class="topbar"><div><h1>Paramètres</h1>'+
+    '<p class="sub">Données, seuils et sauvegarde</p></div></div>';
+  html += storageBanner();
+
+  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Seuil de préparation</h2>'+
+    '<div class="set-row"><label for="set-th">Score minimal pour déclarer une plateforme « prête »</label>'+
+    '<input id="set-th" type="number" min="50" max="100" step="5" value="'+state.settings.readyThreshold+'" data-change="threshold" style="width:90px" class="mono"> <span class="muted">%</span></div></div>';
+
+  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Exporter / importer</h2>'+
+    '<p class="tiny muted" style="margin-bottom:10px">Les données vivent dans ce navigateur ('+(storageOk?'stockage local actif':'stockage local indisponible — session en mémoire')+'). Exportez le JSON pour sauvegarder ou partager, importez-le pour reprendre un état.</p>'+
+    '<div class="set-row">'+
+      '<button class="btn" data-action="export-download">'+icon('down')+'Télécharger le JSON</button>'+
+      '<button class="btn" data-action="export-copy">'+icon('copy')+'Copier le JSON</button>'+
+      '<label class="btn" for="import-file" style="cursor:pointer">'+icon('note')+'Charger un fichier…<input id="import-file" type="file" accept="application/json,.json" class="sr-only"></label>'+
+    '</div>'+
+    '<div class="set-row" style="align-items:flex-start"><textarea id="io-area" class="io" placeholder="Collez ici un export JSON puis cliquez sur Importer."></textarea></div>'+
+    '<div class="set-row"><button class="btn btn-primary" data-action="import-apply">Importer ces données</button></div></div>';
+
+  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Réinitialisation</h2>'+
+    '<div class="set-row"><label>Recharger le jeu de démonstration (remplace tout)</label>'+
+    '<button class="btn" data-action="reset-demo">Recharger la démo</button></div>'+
+    '<div class="set-row"><label>Effacer toutes les données</label>'+
+    '<button class="btn btn-danger" data-action="wipe-all">'+icon('trash')+'Tout effacer</button></div></div>';
+
+  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">À propos</h2>'+
+    '<p class="tiny muted" style="max-width:70ch">Passerelle est une application autonome : un seul fichier HTML, aucune dépendance, données stockées localement dans le navigateur. Pour un usage partagé entre équipes, utilisez l’export JSON comme point d’échange — ou branchez un backend (v2) pour un référentiel commun.</p></div>';
+  return html;
+}
+
+/* ---------- Navigation & rendu ---------- */
+
+const NAV = [
+  {hash:'#/tableau-de-bord', label:'Tableau de bord', ic:'dash'},
+  {hash:'#/plateformes',     label:'Plateformes',     ic:'list'},
+  {hash:'#/pipeline',        label:'Pipeline',        ic:'kanban'},
+  {hash:'#/equipes',         label:'Équipes',         ic:'users'},
+  {hash:'#/parametres',      label:'Paramètres',      ic:'gear'},
+];
+
+function route(){
+  const h = location.hash || '#/tableau-de-bord';
+  const m = h.match(/^#\/plateforme\/(.+)$/);
+  if(m) return {view:'detail', id:decodeURIComponent(m[1])};
+  const map = {'#/tableau-de-bord':'dashboard','#/plateformes':'list','#/pipeline':'kanban','#/equipes':'teams','#/parametres':'settings'};
+  return {view: map[h] || 'dashboard'};
+}
+
+function render(){
+  const r = route();
+  const activeHash = {'dashboard':'#/tableau-de-bord','list':'#/plateformes','kanban':'#/pipeline','teams':'#/equipes','settings':'#/parametres','detail':'#/plateformes'}[r.view];
+  $('#nav').innerHTML = NAV.map(n=>'<a class="nav-a'+(n.hash===activeHash?' active':'')+'" href="'+n.hash+'">'+icon(n.ic)+esc(n.label)+'</a>').join('');
+  $('#side-foot').innerHTML = state.platforms.length+' plateforme'+(state.platforms.length>1?'s':'')+' · '+state.platforms.filter(p=>p.stage!=='run').length+' active'+(state.platforms.filter(p=>p.stage!=='run').length>1?'s':'');
+
+  const sameRoute = lastHash === location.hash;
+  const y = window.scrollY;
+  const views = {dashboard:vDashboard, list:vList, kanban:vKanban, teams:vTeams, settings:vSettings};
+  $('#view').innerHTML = r.view==='detail' ? vDetail(r.id) : views[r.view]();
+  if(sameRoute) window.scrollTo(0,y); else window.scrollTo(0,0);
+  lastHash = location.hash;
+
+  if(r.view==='kanban') bindKanban();
+  if(ui.refocus){
+    const el = $(ui.refocus.sel);
+    if(el){ el.focus(); if(el.setSelectionRange && typeof el.value==='string') try{el.setSelectionRange(el.value.length, el.value.length);}catch(e){} }
+    ui.refocus = null;
+  }
+}
+
+/* ---------- Kanban : glisser-déposer ---------- */
+
+function bindKanban(){
+  document.querySelectorAll('[data-drag]').forEach(card=>{
+    card.addEventListener('dragstart', e=>{
+      e.dataTransfer.setData('text/plain', card.dataset.drag);
+      e.dataTransfer.effectAllowed = 'move';
+      card.classList.add('dragging');
+      dragActive = true;
+    });
+    card.addEventListener('dragend', ()=>{
+      card.classList.remove('dragging');
+      setTimeout(()=>{ dragActive=false; }, 50);
+    });
+  });
+  document.querySelectorAll('[data-drop]').forEach(col=>{
+    col.addEventListener('dragover', e=>{ e.preventDefault(); e.dataTransfer.dropEffect='move'; col.classList.add('dragover'); });
+    col.addEventListener('dragleave', ()=>col.classList.remove('dragover'));
+    col.addEventListener('drop', e=>{
+      e.preventDefault(); col.classList.remove('dragover');
+      const id = e.dataTransfer.getData('text/plain');
+      const p = state.platforms.find(x=>x.id===id);
+      if(p) setStage(p, col.dataset.drop);
+    });
+  });
+}
+let dragActive = false;
+
+/* ---------- Mutations ---------- */
+
+function setStage(p, stage){
+  if(p.stage===stage) return;
+  const from = stageLabel(p.stage);
+  p.stage = stage;
+  if(stage==='mep' && !p.goLiveDate) p.goLiveDate = todayISO();
+  logJ(p, 'Étape : '+from+' → '+stageLabel(stage)+'.');
+  saveState(); render();
+  toast('« '+p.name+' » → '+stageLabel(stage));
+}
+
+function decide(p, d){
+  const comEl = $('#gng-comment');
+  p.gonogo = {decision:d, date:todayISO(), comment: comEl ? comEl.value.trim() : ''};
+  const lbl = {go:'GO', go_reserves:'GO avec réserves', nogo:'NO-GO'}[d];
+  logJ(p, 'Décision '+lbl+' prononcée'+(p.gonogo.comment?' — '+p.gonogo.comment:'.'));
+  if(d!=='nogo' && stageIdx(p.stage)<stageIdx('mep')){
+    p.stage='mep';
+    if(!p.goLiveDate) p.goLiveDate = todayISO();
+    logJ(p, 'Passage à l’étape « Mise en production ».');
+  }
+  saveState(); render();
+  toast('Décision enregistrée : '+lbl, d==='nogo'?'crit':'good');
+}
+
+/* ---------- Modales ---------- */
+
+function openModal(html){
+  $('#modal-root').innerHTML = '<div class="modal-overlay" data-action="overlay-close"><div class="modal" role="dialog" aria-modal="true">'+html+'</div></div>';
+  const f = $('#modal-root').querySelector('input,select,textarea,button');
+  if(f) f.focus();
+}
+function closeModal(){ $('#modal-root').innerHTML=''; }
+
+function platformModal(p){
+  const isNew = !p;
+  const v = p || newPlatform();
+  return '<div class="m-head"><h2>'+(isNew?'Nouvelle plateforme':'Modifier la plateforme')+'</h2>'+
+    '<button class="icon-btn" data-action="close-modal" aria-label="Fermer">✕</button></div>'+
+    '<div class="m-body"><form data-submit="form-platform" data-id="'+(isNew?'':esc(v.id))+'"><div class="form-grid">'+
+    '<div class="f-field full"><label for="fp-name">Nom *</label><input id="fp-name" name="name" required value="'+esc(v.name)+'" placeholder="Ex. : Passerelle d’API — Kong"></div>'+
+    '<div class="f-field"><label for="fp-type">Type</label><select id="fp-type" name="type">'+TYPES.map(t=>'<option'+(t===v.type?' selected':'')+'>'+esc(t)+'</option>').join('')+'</select></div>'+
+    '<div class="f-field"><label for="fp-crit">Criticité</label><select id="fp-crit" name="criticality">'+Object.keys(CRITICITY).map(c=>'<option value="'+c+'"'+(c===v.criticality?' selected':'')+'>'+esc(CRITICITY[c].label)+'</option>').join('')+'</select></div>'+
+    '<div class="f-field"><label for="fp-owner">Porteur MEE</label><input id="fp-owner" name="owner" value="'+esc(v.owner)+'" placeholder="Prénom Nom"></div>'+
+    '<div class="f-field"><label for="fp-sponsor">Demandeur / sponsor</label><input id="fp-sponsor" name="sponsor" value="'+esc(v.sponsor)+'" placeholder="Direction, service…"></div>'+
+    '<div class="f-field"><label for="fp-date">Date cible de MEP</label><input id="fp-date" name="targetDate" type="date" value="'+esc(v.targetDate)+'"></div>'+
+    '<div class="f-field"><label for="fp-golive">Date de MEP réelle</label><input id="fp-golive" name="goLiveDate" type="date" value="'+esc(v.goLiveDate)+'"></div>'+
+    '<div class="f-field full"><label for="fp-desc">Description</label><textarea id="fp-desc" name="description" placeholder="Objet de la plateforme, périmètre, environnements…">'+esc(v.description)+'</textarea></div>'+
+    '</div><div class="m-foot">'+
+    (isNew?'':'<button type="button" class="btn btn-danger" data-action="delete-platform" data-id="'+esc(v.id)+'">'+icon('trash')+'Supprimer</button>')+
+    '<div class="right"><button type="button" class="btn btn-ghost" data-action="close-modal">Annuler</button>'+
+    '<button type="submit" class="btn btn-primary">'+(isNew?'Créer la plateforme':'Enregistrer')+'</button></div></div></form></div>';
+}
+
+function teamModal(t){
+  const isNew = !t;
+  const v = t || {id:'', name:'', lead:'', contact:''};
+  return '<div class="m-head"><h2>'+(isNew?'Nouvelle équipe':'Modifier l’équipe')+'</h2>'+
+    '<button class="icon-btn" data-action="close-modal" aria-label="Fermer">✕</button></div>'+
+    '<div class="m-body"><form data-submit="form-team" data-id="'+(isNew?'':esc(v.id))+'"><div class="form-grid">'+
+    '<div class="f-field full"><label for="ft-name">Nom *</label><input id="ft-name" name="name" required value="'+esc(v.name)+'" placeholder="Ex. : Supervision &amp; Pilotage"></div>'+
+    '<div class="f-field"><label for="ft-lead">Responsable</label><input id="ft-lead" name="lead" value="'+esc(v.lead)+'"></div>'+
+    '<div class="f-field"><label for="ft-contact">Contact</label><input id="ft-contact" name="contact" value="'+esc(v.contact)+'" placeholder="liste de diffusion, canal…"></div>'+
+    '</div><div class="m-foot">'+
+    (isNew?'':'<button type="button" class="btn btn-danger" data-action="delete-team" data-id="'+esc(v.id)+'">'+icon('trash')+'Supprimer</button>')+
+    '<div class="right"><button type="button" class="btn btn-ghost" data-action="close-modal">Annuler</button>'+
+    '<button type="submit" class="btn btn-primary">'+(isNew?'Créer l’équipe':'Enregistrer')+'</button></div></div></form></div>';
+}
+
+function itemModal(pid, catId){
+  const cat = catOf(catId);
+  return '<div class="m-head"><h2>Ajouter un élément — '+esc(cat.label)+'</h2>'+
+    '<button class="icon-btn" data-action="close-modal" aria-label="Fermer">✕</button></div>'+
+    '<div class="m-body"><form data-submit="form-item" data-id="'+esc(pid)+'" data-cat="'+esc(catId)+'"><div class="form-grid">'+
+    '<div class="f-field full"><label for="fi-label">Intitulé *</label><input id="fi-label" name="label" required placeholder="Ex. : Rotation des journaux configurée"></div>'+
+    '<div class="f-field"><label for="fi-team">Équipe</label><select id="fi-team" name="team">'+teamOptions(cat.team)+'</select></div>'+
+    '<div class="f-field"><label for="fi-due">Échéance</label><input id="fi-due" name="due" type="date"></div>'+
+    '</div><div class="m-foot"><div class="right">'+
+    '<button type="button" class="btn btn-ghost" data-action="close-modal">Annuler</button>'+
+    '<button type="submit" class="btn btn-primary">Ajouter</button></div></div></form></div>';
+}
+
+function actionModal(pid){
+  return '<div class="m-head"><h2>Nouvelle action</h2>'+
+    '<button class="icon-btn" data-action="close-modal" aria-label="Fermer">✕</button></div>'+
+    '<div class="m-body"><form data-submit="form-action" data-id="'+esc(pid)+'"><div class="form-grid">'+
+    '<div class="f-field full"><label for="fa-label">Intitulé *</label><input id="fa-label" name="label" required placeholder="Ex. : Rejouer le test de restauration"></div>'+
+    '<div class="f-field"><label for="fa-due">Échéance</label><input id="fa-due" name="due" type="date"></div>'+
+    '<div class="f-field"><label>&nbsp;</label><label class="check-line"><input type="checkbox" name="blocking"> Bloquante pour le Go</label></div>'+
+    '</div><div class="m-foot"><div class="right">'+
+    '<button type="button" class="btn btn-ghost" data-action="close-modal">Annuler</button>'+
+    '<button type="submit" class="btn btn-primary">Ajouter</button></div></div></form></div>';
+}
+
+/* ---------- Toasts ---------- */
+
+function toast(msg, kind){
+  const el = document.createElement('div');
+  el.className = 'toast'+(kind?' '+kind:'');
+  el.textContent = msg;
+  $('#toast-zone').appendChild(el);
+  setTimeout(()=>el.remove(), 3600);
+}
+
+/* ---------- Export / import ---------- */
+
+function exportJSON(){ return JSON.stringify(state, null, 2); }
+
+function downloadExport(){
+  try{
+    const blob = new Blob([exportJSON()], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'passerelle-mee-'+todayISO()+'.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    toast('Export téléchargé');
+  }catch(e){ toast('Téléchargement impossible ici — utilisez « Copier le JSON »','crit'); }
+}
+
+function copyExport(){
+  const txt = exportJSON();
+  const done = ()=>toast('JSON copié dans le presse-papier','good');
+  const fail = ()=>{ const ta=$('#io-area'); if(ta){ta.value=txt; ta.select();} toast('Copie automatique refusée : le JSON est dans la zone de texte','crit'); };
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fail);
+  else fail();
+}
+
+function importData(txt){
+  let s;
+  try{ s = JSON.parse(txt); }catch(e){ toast('JSON invalide','crit'); return; }
+  if(!s || !Array.isArray(s.platforms) || !Array.isArray(s.teams)){ toast('Format inattendu : export Passerelle requis','crit'); return; }
+  s.settings = Object.assign({readyThreshold:90}, s.settings||{});
+  s.version = 1;
+  s.platforms.forEach(p=>{
+    p.checklist = p.checklist||[]; p.actions = p.actions||[]; p.journal = p.journal||[];
+    p.gonogo = p.gonogo||{decision:null,date:'',comment:''};
+  });
+  state = s;
+  saveState(); render();
+  toast('Données importées : '+s.platforms.length+' plateforme'+(s.platforms.length>1?'s':''),'good');
+}
+
+/* ---------- Délégation d'événements ---------- */
+
+document.addEventListener('click', e=>{
+  const actEl = e.target.closest('[data-action]');
+  if(actEl){
+    const a = actEl.dataset.action;
+    const pid = actEl.dataset.id;
+    const p = pid ? state.platforms.find(x=>x.id===pid) : null;
+
+    if(a==='overlay-close'){ if(e.target===actEl) closeModal(); return; }
+    if(a==='close-modal'){ closeModal(); return; }
+    if(a==='new-platform'){ openModal(platformModal(null)); return; }
+    if(a==='edit-platform' && p){ openModal(platformModal(p)); return; }
+    if(a==='delete-platform' && p){
+      if(confirm('Supprimer définitivement « '+p.name+' » ?')){
+        state.platforms = state.platforms.filter(x=>x.id!==p.id);
+        closeModal(); saveState();
+        location.hash = '#/plateformes';
+        render(); toast('Plateforme supprimée');
+      }
+      return;
+    }
+    if(a==='cycle-item' && p){
+      const it = p.checklist.find(i=>i.id===actEl.dataset.item);
+      if(it){ it.status = STATUS_CYCLE[(STATUS_CYCLE.indexOf(it.status)+1)%STATUS_CYCLE.length]; saveState(); render(); }
+      return;
+    }
+    if(a==='toggle-cat'){
+      const key = actEl.dataset.key;
+      const nowOpen = actEl.getAttribute('aria-expanded')==='true';
+      ui.catOpen[key] = !nowOpen;
+      render(); return;
+    }
+    if(a==='toggle-comment'){
+      const key = actEl.dataset.key;
+      ui.comments[key] = !ui.comments[key];
+      render();
+      if(ui.comments[key]){ const ta=$('#view textarea[data-item="'+key.split(':').slice(1).join(':')+'"]'); if(ta) ta.focus(); }
+      return;
+    }
+    if(a==='add-item' && p){ openModal(itemModal(p.id, actEl.dataset.cat)); return; }
+    if(a==='add-action' && p){ openModal(actionModal(p.id)); return; }
+    if(a==='del-action' && p){
+      p.actions = p.actions.filter(x=>x.id!==actEl.dataset.act);
+      saveState(); render(); return;
+    }
+    if(a==='decide' && p){ decide(p, actEl.dataset.d); return; }
+    if(a==='clear-decision' && p){
+      logJ(p, 'Décision '+({go:'GO',go_reserves:'GO avec réserves',nogo:'NO-GO'}[p.gonogo.decision]||'')+' annulée.');
+      p.gonogo = {decision:null, date:'', comment:''};
+      saveState(); render(); return;
+    }
+    if(a==='set-stage' && p){ setStage(p, actEl.dataset.stage); return; }
+    if(a==='next-stage' && p){
+      const i = stageIdx(p.stage);
+      if(i < STAGES.length-1) setStage(p, STAGES[i+1].id);
+      return;
+    }
+    if(a==='print-page'){ window.print(); return; }
+    if(a==='new-team'){ openModal(teamModal(null)); return; }
+    if(a==='edit-team'){ const t=state.teams.find(x=>x.id===actEl.dataset.id); if(t) openModal(teamModal(t)); return; }
+    if(a==='delete-team'){
+      const t = state.teams.find(x=>x.id===actEl.dataset.id);
+      if(t && confirm('Supprimer l’équipe « '+t.name+' » ? Les éléments qui lui sont affectés passeront à « — ».')){
+        state.teams = state.teams.filter(x=>x.id!==t.id);
+        state.platforms.forEach(pp=>pp.checklist.forEach(i=>{ if(i.team===t.id) i.team=''; }));
+        closeModal(); saveState(); render(); toast('Équipe supprimée');
+      }
+      return;
+    }
+    if(a==='hide-seed-banner'){ state.seedBannerHidden = true; saveState(); render(); return; }
+    if(a==='load-demo'){ state = buildSeed(); saveState(); render(); toast('Démonstration chargée','good'); return; }
+    if(a==='reset-demo'){
+      if(confirm('Remplacer toutes les données par le jeu de démonstration ?')){
+        state = buildSeed(); saveState(); render(); toast('Démonstration rechargée','good');
+      }
+      return;
+    }
+    if(a==='wipe-all'){
+      if(confirm('Effacer toutes les données ? Cette action est irréversible (pensez à exporter avant).')){
+        state = blankState();
+        state.teams = seedTeams();
+        saveState(); location.hash='#/tableau-de-bord'; render(); toast('Données effacées');
+      }
+      return;
+    }
+    if(a==='export-download'){ downloadExport(); return; }
+    if(a==='export-copy'){ copyExport(); return; }
+    if(a==='import-apply'){ const ta=$('#io-area'); if(ta && ta.value.trim()) importData(ta.value); else toast('Collez d’abord un export JSON dans la zone de texte','crit'); return; }
+    if(a==='add-note') return; /* géré par submit */
+    return;
+  }
+
+  /* Navigation par lignes / cartes */
+  const navEl = e.target.closest('[data-nav]');
+  if(navEl && !dragActive && !e.target.closest('a,button,select,input,textarea,label')){
+    location.hash = navEl.dataset.nav;
+  }
+});
+
+document.addEventListener('submit', e=>{
+  const f = e.target.closest('form[data-submit]');
+  if(!f) return;
+  e.preventDefault();
+  const kind = f.dataset.submit;
+  const fd = new FormData(f);
+  const val = n => String(fd.get(n)||'').trim();
+
+  if(kind==='form-platform'){
+    if(f.dataset.id){
+      const p = state.platforms.find(x=>x.id===f.dataset.id);
+      if(!p) return;
+      Object.assign(p, {name:val('name'), type:val('type'), criticality:val('criticality'),
+        owner:val('owner'), sponsor:val('sponsor'), targetDate:val('targetDate'),
+        goLiveDate:val('goLiveDate'), description:val('description')});
+      closeModal(); saveState(); render(); toast('Modifications enregistrées','good');
+    }else{
+      const p = newPlatform({name:val('name'), type:val('type'), criticality:val('criticality'),
+        owner:val('owner'), sponsor:val('sponsor'), targetDate:val('targetDate'),
+        goLiveDate:val('goLiveDate'), description:val('description')});
+      logJ(p, 'Fiche créée.');
+      state.platforms.push(p);
+      closeModal(); saveState();
+      location.hash = '#/plateforme/'+p.id;
+      render(); toast('Plateforme créée : checklist initialisée ('+p.checklist.length+' éléments)','good');
+    }
+  }
+  if(kind==='form-team'){
+    if(f.dataset.id){
+      const t = state.teams.find(x=>x.id===f.dataset.id);
+      if(t) Object.assign(t, {name:val('name'), lead:val('lead'), contact:val('contact')});
+    }else{
+      state.teams.push({id:uid('t'), name:val('name'), lead:val('lead'), contact:val('contact')});
+    }
+    closeModal(); saveState(); render(); toast('Équipe enregistrée','good');
+  }
+  if(kind==='form-item'){
+    const p = state.platforms.find(x=>x.id===f.dataset.id);
+    if(p){
+      p.checklist.push({id:'custom.'+uid(''), cat:f.dataset.cat, label:val('label'),
+        status:'todo', team:val('team'), due:val('due'), comment:''});
+      ui.catOpen[p.id+':'+f.dataset.cat] = true;
+      closeModal(); saveState(); render(); toast('Élément ajouté');
+    }
+  }
+  if(kind==='form-action'){
+    const p = state.platforms.find(x=>x.id===f.dataset.id);
+    if(p){
+      const blocking = fd.get('blocking')!==null;
+      p.actions.push({id:uid('a'), label:val('label'), due:val('due'), blocking, done:false});
+      if(blocking) logJ(p, 'Action bloquante ajoutée : '+val('label'));
+      closeModal(); saveState(); render(); toast('Action ajoutée');
+    }
+  }
+  if(kind==='add-note'){
+    const p = state.platforms.find(x=>x.id===f.dataset.id);
+    const note = val('note');
+    if(p && note){ logJ(p, note); saveState(); render(); }
+  }
+});
+
+document.addEventListener('change', e=>{
+  const el = e.target.closest('[data-change]');
+  if(!el) return;
+  const k = el.dataset.change;
+  const p = el.dataset.id ? state.platforms.find(x=>x.id===el.dataset.id) : null;
+
+  if(k==='filter'){ ui.filters[el.dataset.k] = el.value; render(); return; }
+  if(k==='sort'){ ui.sort = el.value; render(); return; }
+  if(k==='threshold'){
+    const v = Math.min(100, Math.max(50, parseInt(el.value,10)||90));
+    state.settings.readyThreshold = v; saveState(); render(); toast('Seuil de préparation : '+v+' %');
+    return;
+  }
+  if(p){
+    const it = el.dataset.item ? p.checklist.find(i=>i.id===el.dataset.item) : null;
+    if(k==='item-team' && it){ it.team = el.value; saveState(); render(); }
+    if(k==='item-due' && it){ it.due = el.value; saveState(); render(); }
+    if(k==='item-comment' && it){ it.comment = el.value.trim(); ui.comments[p.id+':'+it.id]=false; saveState(); render(); }
+    if(k==='toggle-action'){
+      const a = p.actions.find(x=>x.id===el.dataset.act);
+      if(a){
+        a.done = el.checked;
+        if(a.blocking) logJ(p, (a.done?'Action bloquante levée : ':'Action bloquante rouverte : ')+a.label);
+        saveState(); render();
+      }
+    }
+  }
+});
+
+/* Recherche : rendu à la saisie, focus conservé */
+document.addEventListener('input', e=>{
+  const el = e.target.closest('[data-input="search"]');
+  if(!el) return;
+  ui.q = el.value;
+  ui.refocus = {sel:'#f-search'};
+  render();
+});
+
+/* Import par fichier */
+document.addEventListener('change', e=>{
+  if(e.target && e.target.id==='import-file' && e.target.files && e.target.files[0]){
+    const r = new FileReader();
+    r.onload = ()=>{ const ta=$('#io-area'); if(ta) ta.value = String(r.result||''); toast('Fichier chargé — vérifiez puis cliquez sur « Importer »'); };
+    r.readAsText(e.target.files[0]);
+    e.target.value='';
+  }
+});
+
+document.addEventListener('keydown', e=>{
+  if(e.key==='Escape') closeModal();
+});
+
+window.addEventListener('hashchange', render);
+
+/* ---------- Démarrage ---------- */
+
+(function boot(){
+  try{ localStorage.setItem('__pmee_test','1'); localStorage.removeItem('__pmee_test'); }
+  catch(e){ storageOk = false; }
+  state = loadState();
+  if(!state){
+    state = buildSeed();
+    saveState();
+  }
+  state.settings = Object.assign({readyThreshold:90}, state.settings||{});
+  render();
+})();
+</script>
+<!--/A:body-->
+</body>
+</html>
