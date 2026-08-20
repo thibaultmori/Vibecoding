@@ -28,6 +28,7 @@ Trois options, de la plus simple à la plus partagée :
 - **Paramètres** : export JSON (téléchargement ou copie), import (fichier ou collage), seuil de préparation, réinitialisation.
 - **Intégration Jira & Confluence Cloud** : tickets du chantier récupérés par JQL et pages DMEX (Dossier de Mise En eXploitation) rattachées à chaque fiche, avec version, auteur et fraîcheur — voir la section dédiée ci-dessous.
 - **Thèmes clair et sombre** (suit le réglage du système), interface responsive (poste de travail, tablette, mobile).
+- **Robustesse** : sauvegardes locales rotatives (5 instantanés + rappel d'export), garde-fou multi-onglets, imports corrompus neutralisés, signature des notes et décisions (« Votre nom » dans Paramètres), version affichée et tracée dans les exports (voir `CHANGELOG.md`).
 
 ## Données
 
@@ -72,10 +73,11 @@ Ensuite, dans l'application : **Paramètres → Intégration Atlassian** — lai
 
 ### Sécurité
 
-- Le relais n'accepte que des **GET** sur une **liste blanche stricte** de chemins (recherche JQL, lecture de pages/espaces, recherche de pages par label, tests de connexion) ; l'hôte amont est fixe (`ATL_SITE`) ; aucun en-tête du navigateur n'est transmis à Atlassian ; le jeton n'apparaît jamais dans les journaux.
+- Le relais n'accepte que des **GET** sur une **liste blanche stricte** de chemins (recherche JQL, lecture de pages/espaces, recherche de pages par label, tests de connexion) ; l'hôte amont est fixe (`ATL_SITE`) ; aucun en-tête du navigateur n'est transmis à Atlassian ; les **redirections amont ne sont jamais suivies** (le jeton ne peut pas fuir) ; le jeton n'apparaît jamais dans les journaux.
 - Utilisez un **compte de service en lecture seule**, limité aux projets Jira et espaces Confluence utiles.
 - Les jetons API Atlassian **expirent au bout d'un an au maximum** : prévoyez la rotation (symptôme : erreur 401 à la synchronisation).
-- Par défaut le relais n'écoute que sur `127.0.0.1`. Si vous l'exposez au réseau (`--host 0.0.0.0`), toute machine pouvant le joindre lit Jira/Confluence avec les droits du jeton : réservez l'accès au réseau de la direction.
+- Par défaut le relais n'écoute que sur `127.0.0.1`. **Dès qu'il est exposé au réseau** (`--host 0.0.0.0`), définissez `RELAY_ACCESS_TOKEN` : les clients devront présenter ce jeton (Paramètres → « Jeton d'accès au relais ») — sinon toute machine du réseau lirait Jira/Confluence avec les droits du compte de service.
+- Le relais pose les en-têtes de sécurité (CSP, nosniff, X-Frame-Options) sur la page servie et expose un healthcheck `GET /healthz`. Exploitation détaillée : voir `EXPLOITATION.md`.
 
 ### Alternative : reverse proxy existant
 
@@ -97,6 +99,12 @@ location / { root /chemin/vers/passerelle; }
 ### Dans l'Artifact claude.ai
 
 La page publiée en Artifact bloque tout appel réseau : la synchronisation y échoue avec un message explicite, mais **les données déjà synchronisées (ou importées) restent affichées**. Synchronisez depuis la version intranet, exportez, importez dans l'Artifact si besoin.
+
+## Qualité
+
+- Suite de tests versionnée : `npm install` puis `npm test` (57 contrôles applicatifs Playwright dans `tests/e2e.js` + 24 contrôles du relais dans `tests/relay.sh`).
+- Intégration continue GitHub Actions (`.github/workflows/ci.yml`) : syntaxe, tests de bout en bout et tests du relais à chaque push.
+- Versions : `CHANGELOG.md` ; la version courante est affichée dans l'application et incluse dans les exports.
 
 ## Limites connues et suite possible
 

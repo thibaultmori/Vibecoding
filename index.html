@@ -291,6 +291,7 @@ table.plist{width:100%; border-collapse:collapse; font-size:13.5px; min-width:82
 .cat-bar i{display:block; height:100%; background:var(--accent)}
 .cat-bar i.ok{background:var(--good)}
 .cat-body{padding:2px 18px 12px}
+.cat-body.closed{display:none}
 .item{
   display:grid; grid-template-columns:84px minmax(0,1fr) 150px 118px 30px;
   gap:10px; align-items:center; padding:6px 0; border-top:1px dashed var(--line);
@@ -495,6 +496,8 @@ textarea.io{width:100%; min-height:110px; font-family:var(--mono); font-size:12p
    Application autonome : aucune dépendance, stockage local navigateur.
    ================================================================= */
 
+const APP_VERSION = '1.3.0';
+
 /* ---------- Constantes métier ---------- */
 
 const STAGES = [
@@ -594,10 +597,30 @@ function todayISO(){
   return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
 }
 const FMT_D = new Intl.DateTimeFormat('fr-FR',{day:'2-digit',month:'short',year:'numeric'});
-const FMT_TS = new Intl.DateTimeFormat('fr-FR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
-const fmtD = iso => iso ? FMT_D.format(new Date(iso+'T00:00:00')) : '—';
-const fmtTs = ts => ts ? FMT_TS.format(new Date(ts)) : '';
-const daysTo = iso => Math.round((new Date(iso+'T00:00:00') - new Date(todayISO()+'T00:00:00'))/86400000);
+const FMT_TS = new Intl.DateTimeFormat('fr-FR',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+/* Formatteurs défensifs : une date invalide (import corrompu) ne doit jamais faire planter le rendu */
+function fmtD(iso){
+  if(!iso) return '—';
+  const d = new Date(String(iso).slice(0,10)+'T00:00:00');
+  return isNaN(d) ? '—' : FMT_D.format(d);
+}
+function fmtTs(ts){
+  if(!ts) return '';
+  const d = new Date(ts);
+  return isNaN(d) ? '' : FMT_TS.format(d);
+}
+function fmtDateOfTs(ts){
+  const d = new Date(ts);
+  return isNaN(d) ? '—' : FMT_D.format(d);
+}
+function daysTo(iso){
+  const t = new Date(String(iso).slice(0,10)+'T00:00:00');
+  if(isNaN(t)) return 0;
+  return Math.round((t - new Date(todayISO()+'T00:00:00'))/86400000);
+}
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+/* N'autorise que http(s) — neutralise javascript:/data: dans les liens issus de données */
+const safeUrl = u => { u = String(u==null?'':u).trim(); return /^https?:\/\//i.test(u) ? u : ''; };
 
 function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
 
@@ -613,10 +636,81 @@ const ui = {
 };
 let lastHash = null;
 
+let suppressStorageEvent = false;
 function saveState(){
   state.updatedAt = new Date().toISOString();
-  try{ localStorage.setItem(LS_KEY, JSON.stringify(state)); storageOk = true; }
-  catch(e){ storageOk = false; }
+  try{
+    suppressStorageEvent = true;
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+    storageOk = true;
+  }catch(e){ storageOk = false; }
+  finally{ setTimeout(()=>{ suppressStorageEvent = false; }, 0); }
+  maybeDailyBackup();
+}
+
+/* ---------- Sauvegardes locales rotatives (5 instantanés) ---------- */
+
+const BAK_PREFIX = 'passerelle-mee:bak:';
+const BAK_SLOTS = 5;
+let lastBackupDay = null;
+
+function listBackups(){
+  const out = [];
+  for(let i=1; i<=BAK_SLOTS; i++){
+    try{
+      const raw = localStorage.getItem(BAK_PREFIX+i);
+      if(!raw) continue;
+      const b = JSON.parse(raw);
+      if(b && b.at && b.data) out.push({slot:i, at:b.at, reason:b.reason||'', count:(b.data.platforms||[]).length});
+    }catch(e){}
+  }
+  return out.sort((a,b)=>a.at<b.at?1:-1);
+}
+
+function makeBackup(reason){
+  if(!storageOk || !state) return;
+  try{
+    const existing = listBackups();
+    let slot;
+    if(existing.length < BAK_SLOTS){
+      const used = new Set(existing.map(b=>b.slot));
+      slot = 1; while(used.has(slot)) slot++;
+    }else{
+      slot = existing[existing.length-1].slot; /* écrase le plus ancien */
+    }
+    localStorage.setItem(BAK_PREFIX+slot, JSON.stringify({at:new Date().toISOString(), reason, data:state}));
+    lastBackupDay = todayISO();
+  }catch(e){ /* quota : la sauvegarde n'est jamais bloquante */ }
+}
+
+function maybeDailyBackup(){
+  if(lastBackupDay === null){
+    const all = listBackups();
+    lastBackupDay = all.length ? String(all[0].at).slice(0,10) : '';
+  }
+  if(lastBackupDay !== todayISO()) makeBackup('automatique quotidienne');
+}
+
+function restoreBackup(slot){
+  try{
+    const b = JSON.parse(localStorage.getItem(BAK_PREFIX+slot));
+    if(!b || !b.data){ toast('Sauvegarde illisible','crit'); return; }
+    makeBackup('avant restauration');
+    state = normalizeState(b.data);
+    saveState(); render();
+    toast('Sauvegarde du '+fmtTs(b.at)+' restaurée','good');
+  }catch(e){ toast('Restauration impossible : '+e.message,'crit'); }
+}
+
+function lsUsage(){
+  let bytes = 0;
+  try{
+    for(let i=0; i<localStorage.length; i++){
+      const k = localStorage.key(i);
+      if(k && k.startsWith('passerelle-mee')) bytes += (k.length + (localStorage.getItem(k)||'').length) * 2;
+    }
+  }catch(e){}
+  return bytes;
 }
 function loadState(){
   try{
@@ -629,25 +723,82 @@ function loadState(){
 function blankState(){
   return {
     version:1, seeded:false, seedBannerHidden:false,
-    settings:{readyThreshold:90},
-    integrations:{relayUrl:'', siteUrl:'', dmexLabel:'asset-dip'},
+    settings:{readyThreshold:90, userName:''},
+    integrations:{relayUrl:'', siteUrl:'', dmexLabel:'asset-dip', relayToken:''},
     teams:[], platforms:[],
+    lastExportAt:'',
     createdAt:new Date().toISOString(),
   };
 }
 
 const BLANK_SYNC = () => ({at:'', jiraError:'', dmexError:'', partial:false, more:false, issues:[], pages:[]});
 
+/* Normalisation défensive : tout état chargé/importé en ressort exploitable
+   par le rendu, quel que soit son degré de corruption. */
 function normalizeState(s){
-  s.settings = Object.assign({readyThreshold:90}, s.settings||{});
-  s.integrations = Object.assign({relayUrl:'', siteUrl:'', dmexLabel:'asset-dip'}, s.integrations||{});
-  (s.platforms||[]).forEach(p=>{
-    p.checklist = p.checklist||[]; p.actions = p.actions||[]; p.journal = p.journal||[];
-    p.gonogo = p.gonogo||{decision:null,date:'',comment:''};
-    p.jiraJql = p.jiraJql||'';
-    p.dmexPages = p.dmexPages||[];
-    p.sync = Object.assign(BLANK_SYNC(), p.sync||{});
+  const str = v => String(v==null?'':v);
+  const day = v => ISO_DAY.test(str(v)) ? str(v) : '';
+  s.settings = Object.assign({readyThreshold:90, userName:''}, (s.settings&&typeof s.settings==='object')?s.settings:{});
+  let th = parseInt(s.settings.readyThreshold, 10);
+  s.settings.readyThreshold = isNaN(th) ? 90 : Math.min(100, Math.max(50, th));
+  s.settings.userName = str(s.settings.userName);
+  s.integrations = Object.assign({relayUrl:'', siteUrl:'', dmexLabel:'asset-dip', relayToken:''},
+    (s.integrations&&typeof s.integrations==='object')?s.integrations:{});
+  s.integrations.relayUrl = safeUrl(s.integrations.relayUrl);
+  s.integrations.siteUrl = safeUrl(s.integrations.siteUrl);
+  s.integrations.dmexLabel = str(s.integrations.dmexLabel) || 'asset-dip';
+  s.integrations.relayToken = str(s.integrations.relayToken);
+
+  s.teams = (Array.isArray(s.teams)?s.teams:[]).filter(t=>t && typeof t==='object');
+  s.teams.forEach(t=>{ t.id=str(t.id)||uid('t'); t.name=str(t.name)||'Équipe'; t.lead=str(t.lead); t.contact=str(t.contact); });
+
+  const seen = new Set();
+  s.platforms = (Array.isArray(s.platforms)?s.platforms:[]).filter(p=>p && typeof p==='object');
+  s.platforms.forEach(p=>{
+    p.id = str(p.id) || uid('p');
+    while(seen.has(p.id)) p.id = uid('p');
+    seen.add(p.id);
+    p.name = str(p.name) || 'Sans nom';
+    if(stageIdx(p.stage) < 0) p.stage = 'cadrage';
+    if(!CRITICITY[p.criticality]) p.criticality = 'C3';
+    p.type = str(p.type) || TYPES[0];
+    p.owner = str(p.owner); p.sponsor = str(p.sponsor); p.description = str(p.description);
+    p.targetDate = day(p.targetDate); p.goLiveDate = day(p.goLiveDate);
+    p.createdAt = str(p.createdAt) || new Date().toISOString();
+
+    p.checklist = (Array.isArray(p.checklist)?p.checklist:[]).filter(i=>i && typeof i==='object');
+    p.checklist.forEach(i=>{
+      i.id = str(i.id) || uid('i'); i.cat = str(i.cat); i.label = str(i.label);
+      if(!ITEM_STATUS[i.status]) i.status = 'todo';
+      i.team = str(i.team); i.due = day(i.due); i.comment = str(i.comment);
+    });
+    p.actions = (Array.isArray(p.actions)?p.actions:[]).filter(a=>a && typeof a==='object');
+    p.actions.forEach(a=>{
+      a.id = str(a.id) || uid('a'); a.label = str(a.label);
+      a.due = day(a.due); a.blocking = !!a.blocking; a.done = !!a.done;
+    });
+    p.journal = (Array.isArray(p.journal)?p.journal:[]).filter(j=>j && typeof j==='object')
+      .map(j=>({ts:str(j.ts), text:str(j.text), by:str(j.by)}));
+    p.gonogo = Object.assign({decision:null, date:'', comment:'', decidedBy:''},
+      (p.gonogo&&typeof p.gonogo==='object')?p.gonogo:{});
+    if(!['go','go_reserves','nogo'].includes(p.gonogo.decision)) p.gonogo.decision = null;
+    p.gonogo.date = day(p.gonogo.date); p.gonogo.comment = str(p.gonogo.comment); p.gonogo.decidedBy = str(p.gonogo.decidedBy);
+
+    p.jiraJql = str(p.jiraJql);
+    p.dmexPages = (Array.isArray(p.dmexPages)?p.dmexPages:[]).filter(d=>d && typeof d==='object' && d.id)
+      .map(d=>({url:safeUrl(d.url), id:str(d.id)}));
+    p.sync = Object.assign(BLANK_SYNC(), (p.sync&&typeof p.sync==='object')?p.sync:{});
+    p.sync.issues = (Array.isArray(p.sync.issues)?p.sync.issues:[]).filter(i=>i && typeof i==='object')
+      .map(i=>({key:str(i.key), summary:str(i.summary), type:str(i.type), status:str(i.status),
+        statusCat:str(i.statusCat)||'new', assignee:str(i.assignee), priority:str(i.priority),
+        updated:str(i.updated), url:safeUrl(i.url)}));
+    p.sync.pages = (Array.isArray(p.sync.pages)?p.sync.pages:[]).filter(m=>m && typeof m==='object')
+      .map(m=>({id:str(m.id), title:str(m.title), space:str(m.space),
+        version:parseInt(m.version,10)||0, by:str(m.by), when:str(m.when), url:safeUrl(m.url), missing:!!m.missing}));
   });
+  s.seeded = !!s.seeded; s.seedBannerHidden = !!s.seedBannerHidden;
+  s.lastExportAt = str(s.lastExportAt);
+  s.version = 1;
   return s;
 }
 
@@ -675,7 +826,7 @@ function newPlatform(fields){
 }
 
 function logJ(p, text){
-  p.journal.unshift({ts:new Date().toISOString(), text});
+  p.journal.unshift({ts:new Date().toISOString(), text, by:(state && state.settings.userName)||''});
 }
 
 function score(p){
@@ -873,11 +1024,14 @@ async function atlFetch(pathAndQuery){
   const url = relayBase() + '/atlassian' + pathAndQuery;
   const ctrl = new AbortController();
   const timer = setTimeout(()=>ctrl.abort(), 15000);
+  const headers = {'Accept':'application/json'};
+  if(state.integrations.relayToken) headers['X-Relay-Token'] = state.integrations.relayToken;
   let res;
   try{
-    res = await fetch(url, {signal:ctrl.signal, headers:{'Accept':'application/json'}});
+    res = await fetch(url, {signal:ctrl.signal, headers});
   }catch(e){
     clearTimeout(timer);
+    if(e && e.name==='AbortError') throw new Error('Délai dépassé (15 s) : Atlassian ou le relais ne répond pas.');
     const hint = (location.protocol==='file:' && !relayBase())
       ? 'lancez le relais (python3 relay.py) et ouvrez l’application via http://…:8765/, ou renseignez l’URL du relais dans Paramètres.'
       : 'relais éteint ou appels réseau bloqués ici (page hébergée en Artifact). Synchronisez depuis la version intranet — les données en cache restent affichées.';
@@ -936,9 +1090,10 @@ function parsePageId(input){
   const s = String(input||'').trim();
   if(!s) return {error:'Collez l’URL d’une page Confluence.'};
   if(/^\d+$/.test(s)) return {id:s, url:''};
+  if(!/^https?:\/\//i.test(s)) return {error:'URL non reconnue : collez une URL complète en https:// (ou l’identifiant numérique de la page).'};
   let m = s.match(/\/pages\/(?:edit-v2\/)?(\d+)/);
   if(!m) m = s.match(/[?&]pageId=(\d+)/);
-  if(m) return {id:m[1], url:s};
+  if(m) return {id:m[1], url:safeUrl(s)};
   if(/\/wiki\/x\//.test(s)) return {error:'Lien court « /wiki/x/… » non pris en charge : ouvrez la page et collez son URL complète.'};
   return {error:'URL non reconnue : collez l’URL complète d’une page (…/wiki/spaces/…/pages/<id>/…).'};
 }
@@ -994,14 +1149,20 @@ async function confluenceLabelSearch(text){
 }
 
 let dmexSearch = {pid:null, items:[], q:'', state:'idle', error:''};
+let dmexSeq = 0;
 
 async function runDmexSearch(p, q){
+  const seq = ++dmexSeq;
   dmexSearch = {pid:p.id, items:[], q:String(q||''), state:'loading', error:''};
   const zone = $('#dmex-results');
   if(zone) zone.innerHTML = dmexResultsHtml(p);
-  try{ dmexSearch.items = await confluenceLabelSearch(q); dmexSearch.state='done'; }
-  catch(e){ dmexSearch.error = e.message; dmexSearch.state='done'; }
-  if(dmexSearch.pid !== p.id) return;
+  let items = null, error = '';
+  try{ items = await confluenceLabelSearch(q); }
+  catch(e){ error = e.message; }
+  if(seq !== dmexSeq) return; /* une recherche plus récente a pris la main */
+  dmexSearch.items = items || [];
+  dmexSearch.error = error;
+  dmexSearch.state = 'done';
   const z2 = $('#dmex-results');
   if(z2) z2.innerHTML = dmexResultsHtml(p);
 }
@@ -1010,34 +1171,40 @@ const syncing = {};
 
 async function syncPlatform(p){
   if(syncing[p.id]) return;
-  syncing[p.id] = true; render();
+  const pid = p.id;
+  syncing[pid] = true; render();
   const res = Object.assign(BLANK_SYNC(), {
     at:new Date().toISOString(),
     issues:p.sync.issues, pages:p.sync.pages, more:p.sync.more,
   });
-  await Promise.all([
-    (async()=>{
-      if(!p.jiraJql.trim()){ res.issues=[]; res.more=false; return; }
-      try{ const r = await jiraSearch(p.jiraJql.trim()); res.issues=r.issues; res.more=r.more; }
-      catch(e){ res.jiraError = e.message; }
-    })(),
-    (async()=>{
-      const ids = p.dmexPages.map(d=>d.id).filter(Boolean);
-      if(!ids.length){ res.pages=[]; return; }
-      try{
-        const metas = await confluencePageMeta(ids);
-        const byId = {}; metas.forEach(m=>{ byId[m.id]=m; });
-        res.pages = p.dmexPages.map(d=>{
-          const m = byId[String(d.id)];
-          return m ? Object.assign({}, m, {url:d.url||m.url})
-                   : {id:String(d.id), title:'Page '+d.id+' (introuvable ou accès refusé)', space:'', version:0, by:'', when:'', url:d.url, missing:true};
-        });
-      }catch(e){ res.dmexError = e.message; }
-    })(),
-  ]);
+  try{
+    await Promise.all([
+      (async()=>{
+        if(!p.jiraJql.trim()){ res.issues=[]; res.more=false; return; }
+        try{ const r = await jiraSearch(p.jiraJql.trim()); res.issues=r.issues; res.more=r.more; }
+        catch(e){ res.jiraError = e.message; }
+      })(),
+      (async()=>{
+        const ids = p.dmexPages.map(d=>d.id).filter(Boolean);
+        if(!ids.length){ res.pages=[]; return; }
+        try{
+          const metas = await confluencePageMeta(ids);
+          const byId = {}; metas.forEach(m=>{ byId[m.id]=m; });
+          res.pages = p.dmexPages.map(d=>{
+            const m = byId[String(d.id)];
+            return m ? Object.assign({}, m, {url:d.url||m.url})
+                     : {id:String(d.id), title:'Page '+d.id+' (introuvable ou accès refusé)', space:'', version:0, by:'', when:'', url:d.url, missing:true};
+          });
+        }catch(e){ res.dmexError = e.message; }
+      })(),
+    ]);
+  }finally{
+    delete syncing[pid];
+  }
+  /* La fiche a pu être supprimée ou remplacée (reset démo) pendant la synchro */
+  if(state.platforms.find(x=>x.id===pid) !== p){ render(); return; }
   res.partial = !!(res.jiraError||res.dmexError) && !(res.jiraError&&res.dmexError);
   p.sync = res;
-  delete syncing[p.id];
   if(res.jiraError && res.dmexError){ logJ(p,'Synchronisation Jira & DMEX en échec.'); toast('Synchronisation en échec','crit'); }
   else if(res.jiraError||res.dmexError){ logJ(p,'Synchronisation partielle : '+(res.jiraError?'Jira':'DMEX')+' en échec.'); toast('Synchronisation partielle','crit'); }
   else { logJ(p,'Synchronisation Jira & DMEX : '+res.issues.length+' ticket(s), '+res.pages.length+' page(s) DMEX.'); toast('Synchronisation réussie','good'); }
@@ -1106,6 +1273,17 @@ function storageBanner(){
   '</div>';
 }
 
+function exportReminder(){
+  if(state.seeded || !state.platforms.length) return '';
+  const last = state.lastExportAt ? Date.parse(state.lastExportAt) : 0;
+  const days = last ? Math.floor((Date.now()-last)/86400000) : null;
+  if(days !== null && days < 7) return '';
+  return '<div class="banner" style="background:var(--surface2); color:var(--ink2); border-color:var(--line)">'+
+    '<span>'+(days===null ? 'Aucun export téléchargé pour l’instant' : 'Dernier export il y a '+days+' jours')+
+    ' — les données ne vivent que dans ce navigateur.</span><span class="spacer"></span>'+
+    '<button class="btn btn-s" data-action="export-download">'+icon('down')+'Exporter maintenant</button></div>';
+}
+
 /* ---------- Vue : tableau de bord ---------- */
 
 function vDashboard(){
@@ -1119,7 +1297,7 @@ function vDashboard(){
   let html = '<div class="topbar"><div><h1>Tableau de bord</h1>'+
     '<p class="sub">Direction Infrastructures &amp; Production · '+ps.length+' plateforme'+(ps.length>1?'s':'')+' suivie'+(ps.length>1?'s':'')+'</p></div>'+
     '<div class="topbar-actions"><button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button></div></div>';
-  html += storageBanner() + seedBanner();
+  html += storageBanner() + seedBanner() + exportReminder();
 
   if(!ps.length) return html + emptyState();
 
@@ -1162,11 +1340,12 @@ function vDashboard(){
   html += next.length
     ? '<div class="rows">'+next.map(p=>{
         const d = daysTo(p.targetDate);
+        const dchip = stageIdx(p.stage) >= stageIdx('mep') ? '' :
+          '<span class="dchip'+(isLate(p)?' late':'')+'">'+(isLate(p)?'retard '+Math.abs(d)+' j':'J−'+d)+'</span>';
         return '<div class="row-item" data-nav="#/plateforme/'+esc(p.id)+'">'+
           '<div class="row-main"><div class="row-title">'+esc(p.name)+'</div>'+
           '<div class="row-sub">'+esc(stageLabel(p.stage))+' · '+esc(p.owner||'—')+'</div></div>'+
-          '<span class="row-metrics">'+miniBar(score(p), score(p)>=state.settings.readyThreshold)+
-          '<span class="dchip'+(isLate(p)?' late':'')+'">'+(isLate(p)?'retard '+Math.abs(d)+' j':'J−'+d)+'</span>'+
+          '<span class="row-metrics">'+miniBar(score(p), score(p)>=state.settings.readyThreshold)+dchip+
           '<span class="mono tiny muted">'+fmtD(p.targetDate)+'</span></span></div>';
       }).join('')+'</div>'
     : '<p class="empty-note">Aucune date cible renseignée.</p>';
@@ -1334,7 +1513,7 @@ function vDetail(id){
   /* En-tête */
   html += '<div class="card det-head"><div class="det-title-row"><div>'+
     '<h1>'+esc(p.name)+'</h1>'+
-    '<div class="det-chips">'+chip(stageLabel(p.stage),'stage')+critChip(p.criticality)+statusChip(p)+chip(esc(p.type),'outline')+'</div>'+
+    '<div class="det-chips">'+chip(stageLabel(p.stage),'stage')+critChip(p.criticality)+statusChip(p)+chip(p.type,'outline')+'</div>'+
     '</div><div class="topbar-actions">'+
     (idx<STAGES.length-1?'<button class="btn" data-action="next-stage" data-id="'+esc(p.id)+'">Étape suivante '+icon('arr')+'</button>':'')+
     '<button class="btn" data-action="print-page">'+icon('print')+'Imprimer la fiche</button>'+
@@ -1344,7 +1523,7 @@ function vDetail(id){
       meta('Porteur MEE', p.owner)+meta('Demandeur', p.sponsor)+
       meta('Date cible', p.targetDate?fmtD(p.targetDate):'')+
       meta('MEP réelle', p.goLiveDate?fmtD(p.goLiveDate):'')+
-      meta('Créée le', fmtD(p.createdAt.slice(0,10)))+
+      meta('Créée le', fmtDateOfTs(p.createdAt))+
     '</div>'+
     (p.description?'<p class="desc">'+esc(p.description)+'</p>':'')+
     '<div class="stepper" role="group" aria-label="Étapes">'+STAGES.map((s,i)=>{
@@ -1359,7 +1538,12 @@ function vDetail(id){
   /* Checklist */
   html += '<div class="card"><div class="card-head"><h2 class="card-title">Checklist d’exploitabilité</h2>'+
     '<span class="cat-count">'+p.checklist.filter(i=>i.status==='done').length+' / '+p.checklist.length+'</span></div>';
-  TEMPLATE.forEach(cat=>{
+  /* Catégories du référentiel + catégories « fantômes » (items d'un ancien TEMPLATE) :
+     rien ne doit être invisible tout en comptant dans le score */
+  const knownCats = new Set(TEMPLATE.map(c=>c.id));
+  const ghostCats = [...new Set(p.checklist.filter(i=>!knownCats.has(i.cat)).map(i=>i.cat))]
+    .map(id=>({id, label:'Hors référentiel — '+(id||'sans catégorie'), team:''}));
+  TEMPLATE.concat(ghostCats).forEach(cat=>{
     const stats = catStats(p, cat.id);
     if(!stats.total) return;
     const key = p.id+':'+cat.id;
@@ -1372,8 +1556,8 @@ function vDetail(id){
         '<span class="cat-bar"><i class="'+(stats.complete?'ok':'')+'" style="width:'+stats.pct+'%"></i></span>'+
         '<span class="cat-count">'+stats.done+'/'+stats.base+(stats.na?' <span class="muted">(+'+stats.na+' n/a)</span>':'')+'</span>'+
       '</button>';
-    if(open){
-      html += '<div class="cat-body">'+stats.items.map(it=>{
+    {
+      html += '<div class="cat-body'+(open?'':' closed')+'">'+stats.items.map(it=>{
         const st = ITEM_STATUS[it.status];
         const comOpen = ui.comments[p.id+':'+it.id] || false;
         return '<div class="item">'+
@@ -1414,9 +1598,10 @@ function vDetail(id){
   /* Journal */
   html += '<div class="card"><div class="card-head"><h2 class="card-title">Journal</h2></div>'+
     '<form class="note-form" data-submit="add-note" data-id="'+esc(p.id)+'">'+
-      '<input name="note" placeholder="Ajouter une note au journal…" autocomplete="off">'+
+      '<input name="note" data-draft="note:'+esc(p.id)+'" placeholder="Ajouter une note au journal…" autocomplete="off">'+
       '<button class="btn" type="submit">Noter</button></form>'+
-    (p.journal.length ? p.journal.map(j=>'<div class="j-row"><span class="j-ts">'+esc(fmtTs(j.ts))+'</span><span>'+esc(j.text)+'</span></div>').join('')
+    (p.journal.length ? p.journal.map(j=>'<div class="j-row"><span class="j-ts">'+esc(fmtTs(j.ts))+'</span><span>'+esc(j.text)+
+      (j.by?' <span class="muted tiny">— '+esc(j.by)+'</span>':'')+'</span></div>').join('')
       : '<p class="empty-note">Journal vide.</p>')+
   '</div>';
 
@@ -1449,11 +1634,12 @@ function vDetail(id){
   if(p.gonogo.decision){
     const lbl = {go:'GO', go_reserves:'GO avec réserves', nogo:'NO-GO'}[p.gonogo.decision];
     const cls = {go:'good', go_reserves:'warn', nogo:'crit'}[p.gonogo.decision];
-    html += '<div class="gng-decided"><div>'+chip(lbl,cls)+' <span class="d-date">'+fmtD(p.gonogo.date)+'</span></div>'+
+    html += '<div class="gng-decided"><div>'+chip(lbl,cls)+' <span class="d-date">'+fmtD(p.gonogo.date)+
+      (p.gonogo.decidedBy?' · par '+esc(p.gonogo.decidedBy):'')+'</span></div>'+
       (p.gonogo.comment?'<div class="d-com">'+esc(p.gonogo.comment)+'</div>':'')+
       '<div style="margin-top:8px"><button class="btn btn-s btn-ghost" data-action="clear-decision" data-id="'+esc(p.id)+'">Annuler la décision</button></div></div>';
   } else {
-    html += '<textarea id="gng-comment" placeholder="Commentaire de la revue (réserves, conditions…)" style="min-height:56px"></textarea>'+
+    html += '<textarea id="gng-comment" data-draft="gng:'+esc(p.id)+'" placeholder="Commentaire de la revue (réserves, conditions…)" style="min-height:56px"></textarea>'+
       '<div class="gng-btns">'+
       '<button class="btn btn-go" data-action="decide" data-id="'+esc(p.id)+'" data-d="go">Go</button>'+
       '<button class="btn" data-action="decide" data-id="'+esc(p.id)+'" data-d="go_reserves">Go avec réserves</button>'+
@@ -1487,11 +1673,12 @@ function cardJira(p){
     html += '<div class="jscroll"><table class="jtable"><thead><tr><th>Clé</th><th>Résumé</th><th>Statut</th><th>Assigné</th><th>Maj</th></tr></thead><tbody>'+
       s.issues.map(i=>{
         const c = jiraCat(i.statusCat);
-        return '<tr><td class="jkey">'+(i.url?'<a href="'+esc(i.url)+'" target="_blank" rel="noopener">'+esc(i.key)+'</a>':esc(i.key))+'</td>'+
+        const u = safeUrl(i.url);
+        return '<tr><td class="jkey">'+(u?'<a href="'+esc(u)+'" target="_blank" rel="noopener noreferrer">'+esc(i.key)+'</a>':esc(i.key))+'</td>'+
           '<td>'+esc(i.summary)+'</td>'+
           '<td>'+chip(i.status||c.label, c.cls)+'</td>'+
           '<td>'+esc(i.assignee||'—')+'</td>'+
-          '<td class="mono tiny muted" style="white-space:nowrap">'+(i.updated?fmtD(i.updated.slice(0,10)):'—')+'</td></tr>';
+          '<td class="mono tiny muted" style="white-space:nowrap">'+(i.updated?fmtDateOfTs(i.updated):'—')+'</td></tr>';
       }).join('')+'</tbody></table></div>';
   } else if(!s.jiraError){
     html += p.jiraJql.trim()
@@ -1510,7 +1697,7 @@ function cardDmex(p){
   let html = '<div class="card"><div class="card-head"><h2 class="card-title">DMEX — Dossier de mise en exploitation</h2>'+
     (p.dmexPages.length?'<span class="cat-count">'+p.dmexPages.length+' page'+(p.dmexPages.length>1?'s':'')+'</span>':'')+'</div>';
   html += '<form class="note-form" data-submit="add-dmex" data-id="'+esc(p.id)+'">'+
-    '<input name="url" placeholder="Coller l’URL d’une page Confluence (…/wiki/spaces/…/pages/…)" autocomplete="off">'+
+    '<input name="url" data-draft="dmexurl:'+esc(p.id)+'" placeholder="Coller l’URL d’une page Confluence (…/wiki/spaces/…/pages/…)" autocomplete="off">'+
     '<button class="btn" type="submit">Ajouter</button>'+
     '<button class="btn" type="button" data-action="dmex-search-open" data-id="'+esc(p.id)+'" title="Rechercher les pages portant le label DMEX">'+icon('search')+'Rechercher</button></form>';
   if(s.dmexError) html += '<div class="int-error">'+esc(s.dmexError)+'</div>';
@@ -1518,13 +1705,13 @@ function cardDmex(p){
     const metaById = {}; s.pages.forEach(m=>{ metaById[String(m.id)] = m; });
     html += p.dmexPages.map(d=>{
       const m = metaById[String(d.id)];
-      const url = (m && m.url) || d.url;
+      const url = safeUrl((m && m.url) || d.url);
       const title = m ? m.title : 'Page '+d.id;
       const old = m && !m.missing && m.when && (Date.now()-Date.parse(m.when)) > 183*86400000;
       return '<div class="dmex-row"><div class="dmex-main">'+
-        '<div class="dmex-title">'+(url?'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(title)+'</a>':esc(title))+'</div>'+
+        '<div class="dmex-title">'+(url?'<a href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">'+esc(title)+'</a>':esc(title))+'</div>'+
         '<div class="dmex-meta">'+(m && !m.missing
-          ? esc(m.space||'—')+' · v.'+m.version+(m.by?' · par '+esc(m.by):'')+(m.when?' · le '+fmtD(String(m.when).slice(0,10)):'')
+          ? esc(m.space||'—')+' · v.'+m.version+(m.by?' · par '+esc(m.by):'')+(m.when?' · le '+fmtDateOfTs(m.when):'')
           : (m && m.missing ? 'Page introuvable ou accès refusé' : 'En attente de synchronisation'))+'</div></div>'+
         (old?chip('> 6 mois','warn'):'')+
         '<button class="icon-btn" data-action="del-dmex" data-id="'+esc(p.id)+'" data-page="'+esc(d.id)+'" title="Retirer" aria-label="Retirer la page">'+icon('trash')+'</button>'+
@@ -1543,9 +1730,10 @@ function dmexResultsHtml(p){
   if(!dmexSearch.items.length) return '<p class="empty-note" style="padding:10px 0">Aucune page trouvée avec ce label'+(dmexSearch.q?' et ce filtre de titre':'')+'.</p>';
   return dmexSearch.items.map(m=>{
     const attached = p.dmexPages.some(d=>String(d.id)===m.id);
+    const u = safeUrl(m.url);
     return '<div class="dmex-row" style="padding:9px 0"><div class="dmex-main">'+
-      '<div class="dmex-title">'+(m.url?'<a href="'+esc(m.url)+'" target="_blank" rel="noopener">'+esc(m.title)+'</a>':esc(m.title))+'</div>'+
-      '<div class="dmex-meta">'+esc(m.space||'—')+' · v.'+m.version+(m.by?' · par '+esc(m.by):'')+(m.when?' · le '+fmtD(String(m.when).slice(0,10)):'')+'</div></div>'+
+      '<div class="dmex-title">'+(u?'<a href="'+esc(u)+'" target="_blank" rel="noopener noreferrer">'+esc(m.title)+'</a>':esc(m.title))+'</div>'+
+      '<div class="dmex-meta">'+esc(m.space||'—')+' · v.'+m.version+(m.by?' · par '+esc(m.by):'')+(m.when?' · le '+fmtDateOfTs(m.when):'')+'</div></div>'+
       (attached ? chip('Rattachée','good')
         : '<button class="btn btn-s" data-action="dmex-attach" data-id="'+esc(p.id)+'" data-page="'+esc(m.id)+'">'+icon('plus')+'Ajouter</button>')+
     '</div>';
@@ -1592,6 +1780,10 @@ function vSettings(){
     '<p class="sub">Données, seuils et sauvegarde</p></div></div>';
   html += storageBanner();
 
+  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Identité</h2>'+
+    '<div class="set-row"><label for="set-name">Votre nom (apposé au journal et aux décisions Go/No-Go)</label>'+
+    '<input id="set-name" data-change="user-name" value="'+esc(state.settings.userName)+'" placeholder="Prénom Nom" style="min-width:220px"></div></div>';
+
   html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Seuil de préparation</h2>'+
     '<div class="set-row"><label for="set-th">Score minimal pour déclarer une plateforme « prête »</label>'+
     '<input id="set-th" type="number" min="50" max="100" step="5" value="'+state.settings.readyThreshold+'" data-change="threshold" style="width:90px" class="mono"> <span class="muted">%</span></div></div>';
@@ -1603,8 +1795,16 @@ function vSettings(){
       '<button class="btn" data-action="export-copy">'+icon('copy')+'Copier le JSON</button>'+
       '<label class="btn" for="import-file" style="cursor:pointer">'+icon('note')+'Charger un fichier…<input id="import-file" type="file" accept="application/json,.json" class="sr-only"></label>'+
     '</div>'+
-    '<div class="set-row" style="align-items:flex-start"><textarea id="io-area" class="io" placeholder="Collez ici un export JSON puis cliquez sur Importer."></textarea></div>'+
+    '<div class="set-row" style="align-items:flex-start"><textarea id="io-area" data-draft="io" class="io" placeholder="Collez ici un export JSON puis cliquez sur Importer."></textarea></div>'+
     '<div class="set-row"><button class="btn btn-primary" data-action="import-apply">Importer ces données</button></div></div>';
+
+  const baks = listBackups();
+  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Sauvegardes locales</h2>'+
+    '<p class="tiny muted" style="margin-bottom:8px; max-width:80ch">Cinq instantanés rotatifs conservés dans ce navigateur : un automatique par jour de modification, plus un avant chaque import, effacement ou rechargement de démo. Ce n’est pas une sauvegarde externe — exportez régulièrement. Occupation locale : '+Math.round(lsUsage()/1024)+' Ko.</p>'+
+    (baks.length ? baks.map(b=>'<div class="set-row"><label class="mono tiny" style="min-width:340px">'+esc(fmtTs(b.at))+' · '+esc(b.reason)+' · '+b.count+' plateforme'+(b.count>1?'s':'')+'</label>'+
+      '<button class="btn btn-s" data-action="restore-backup" data-slot="'+b.slot+'">Restaurer</button></div>').join('')
+      : '<p class="tiny muted">Aucune sauvegarde pour l’instant.</p>')+
+    '<div class="set-row" style="margin-top:4px"><button class="btn btn-s" data-action="make-backup">Créer une sauvegarde maintenant</button></div></div>';
 
   const it = state.integrations;
   const fileHint = (location.protocol==='file:' && !it.relayUrl)
@@ -1617,6 +1817,8 @@ function vSettings(){
     '<input id="int-site" data-change="int-site" value="'+esc(it.siteUrl)+'" placeholder="https://mon-entreprise.atlassian.net" style="min-width:280px" class="mono"></div>'+
     '<div class="set-row"><label for="int-label">Label Confluence des pages DMEX</label>'+
     '<input id="int-label" data-change="int-label" value="'+esc(it.dmexLabel||'asset-dip')+'" placeholder="asset-dip" style="min-width:160px" class="mono"></div>'+
+    '<div class="set-row"><label for="int-token">Jeton d’accès au relais (si RELAY_ACCESS_TOKEN y est configuré)</label>'+
+    '<input id="int-token" type="password" data-change="int-token" value="'+esc(it.relayToken)+'" placeholder="optionnel" style="min-width:200px" class="mono" autocomplete="off"></div>'+
     '<div class="set-row">'+
       '<button class="btn" data-action="test-atl" data-kind="jira">Tester Jira</button>'+
       '<button class="btn" data-action="test-atl" data-kind="confluence">Tester Confluence</button>'+
@@ -1634,7 +1836,7 @@ function vSettings(){
     '<button class="btn btn-danger" data-action="wipe-all">'+icon('trash')+'Tout effacer</button></div></div>';
 
   html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">À propos</h2>'+
-    '<p class="tiny muted" style="max-width:70ch">Passerelle est une application autonome : un seul fichier HTML, aucune dépendance, données stockées localement dans le navigateur. Pour un usage partagé entre équipes, utilisez l’export JSON comme point d’échange — ou branchez un backend (v2) pour un référentiel commun.</p></div>';
+    '<p class="tiny muted" style="max-width:70ch">Passerelle <span class="mono">v'+APP_VERSION+'</span> — application autonome : un seul fichier HTML, aucune dépendance, données stockées localement dans le navigateur. Pour un usage partagé entre équipes, utilisez l’export JSON comme point d’échange — ou branchez un backend (v2) pour un référentiel commun.</p></div>';
   return html;
 }
 
@@ -1651,7 +1853,11 @@ const NAV = [
 function route(){
   const h = location.hash || '#/tableau-de-bord';
   const m = h.match(/^#\/plateforme\/(.+)$/);
-  if(m) return {view:'detail', id:decodeURIComponent(m[1])};
+  if(m){
+    let id = m[1];
+    try{ id = decodeURIComponent(id); }catch(e){}
+    return {view:'detail', id};
+  }
   const map = {'#/tableau-de-bord':'dashboard','#/plateformes':'list','#/pipeline':'kanban','#/equipes':'teams','#/parametres':'settings'};
   return {view: map[h] || 'dashboard'};
 }
@@ -1660,13 +1866,37 @@ function render(){
   const r = route();
   const activeHash = {'dashboard':'#/tableau-de-bord','list':'#/plateformes','kanban':'#/pipeline','teams':'#/equipes','settings':'#/parametres','detail':'#/plateformes'}[r.view];
   $('#nav').innerHTML = NAV.map(n=>'<a class="nav-a'+(n.hash===activeHash?' active':'')+'" href="'+n.hash+'">'+icon(n.ic)+esc(n.label)+'</a>').join('');
-  $('#side-foot').innerHTML = state.platforms.length+' plateforme'+(state.platforms.length>1?'s':'')+' · '+state.platforms.filter(p=>p.stage!=='run').length+' active'+(state.platforms.filter(p=>p.stage!=='run').length>1?'s':'');
+  $('#side-foot').innerHTML = state.platforms.length+' plateforme'+(state.platforms.length>1?'s':'')+' · '+state.platforms.filter(p=>p.stage!=='run').length+' active'+(state.platforms.filter(p=>p.stage!=='run').length>1?'s':'')+'<br><span class="mono">v'+APP_VERSION+'</span>';
 
   const sameRoute = lastHash === location.hash;
   const y = window.scrollY;
+
+  /* Préserve les saisies en cours (champs volatils marqués data-draft) :
+     un render() asynchrone ne doit jamais effacer un texte en cours de frappe */
+  const drafts = {};
+  let draftFocus = null, selS = 0, selE = 0;
+  document.querySelectorAll('#view [data-draft]').forEach(el=>{
+    if(el.value) drafts[el.dataset.draft] = el.value;
+    if(el === document.activeElement){
+      draftFocus = el.dataset.draft;
+      try{ selS = el.selectionStart; selE = el.selectionEnd; }catch(e){}
+    }
+  });
+
   const views = {dashboard:vDashboard, list:vList, kanban:vKanban, teams:vTeams, settings:vSettings};
   $('#view').innerHTML = r.view==='detail' ? vDetail(r.id) : views[r.view]();
   if(sameRoute) window.scrollTo(0,y); else window.scrollTo(0,0);
+
+  if(sameRoute){
+    Object.keys(drafts).forEach(k=>{
+      const el = $('#view [data-draft="'+k+'"]');
+      if(el && !el.value) el.value = drafts[k];
+    });
+    if(draftFocus){
+      const el = $('#view [data-draft="'+draftFocus+'"]');
+      if(el){ el.focus(); try{ el.setSelectionRange(selS, selE); }catch(e){} }
+    }
+  }
   lastHash = location.hash;
 
   if(r.view==='kanban') bindKanban();
@@ -1719,7 +1949,7 @@ function setStage(p, stage){
 
 function decide(p, d){
   const comEl = $('#gng-comment');
-  p.gonogo = {decision:d, date:todayISO(), comment: comEl ? comEl.value.trim() : ''};
+  p.gonogo = {decision:d, date:todayISO(), comment: comEl ? comEl.value.trim() : '', decidedBy: state.settings.userName||''};
   const lbl = {go:'GO', go_reserves:'GO avec réserves', nogo:'NO-GO'}[d];
   logJ(p, 'Décision '+lbl+' prononcée'+(p.gonogo.comment?' — '+p.gonogo.comment:'.'));
   if(d!=='nogo' && stageIdx(p.stage)<stageIdx('mep')){
@@ -1812,7 +2042,17 @@ function toast(msg, kind){
 
 /* ---------- Export / import ---------- */
 
-function exportJSON(){ return JSON.stringify(state, null, 2); }
+function exportJSON(){ return JSON.stringify(Object.assign({}, state, {appVersion:APP_VERSION}), null, 2); }
+
+function markExported(){ state.lastExportAt = new Date().toISOString(); saveState(); }
+
+/* Compare '1.2.3' à APP_VERSION ; vrai si a > b */
+function versionGt(a, b){
+  const pa = String(a||'').split('.').map(n=>parseInt(n,10)||0);
+  const pb = String(b||'').split('.').map(n=>parseInt(n,10)||0);
+  for(let i=0; i<3; i++){ if((pa[i]||0)!==(pb[i]||0)) return (pa[i]||0)>(pb[i]||0); }
+  return false;
+}
 
 async function downloadExport(){
   const data = exportJSON();
@@ -1821,7 +2061,7 @@ async function downloadExport(){
   const dl = (window.claude && typeof window.claude.use==='function')
     ? await window.claude.use('downloads').catch(()=>null) : null;
   if(dl){
-    try{ await dl.save({filename, data}); toast('Export enregistré','good'); }
+    try{ await dl.save({filename, data}); markExported(); toast('Export enregistré','good'); }
     catch(e){
       if(e && e.code==='declined') toast('Enregistrement annulé');
       else toast('Enregistrement impossible — utilisez « Copier le JSON »','crit');
@@ -1835,13 +2075,14 @@ async function downloadExport(){
     a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    markExported();
     toast('Export téléchargé');
   }catch(e){ toast('Téléchargement impossible ici — utilisez « Copier le JSON »','crit'); }
 }
 
 function copyExport(){
   const txt = exportJSON();
-  const done = ()=>toast('JSON copié dans le presse-papier','good');
+  const done = ()=>{ markExported(); toast('JSON copié dans le presse-papier','good'); };
   const fail = ()=>{ const ta=$('#io-area'); if(ta){ta.value=txt; ta.select();} toast('Copie automatique refusée : le JSON est dans la zone de texte','crit'); };
   if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fail);
   else fail();
@@ -1850,11 +2091,14 @@ function copyExport(){
 function importData(txt){
   let s;
   try{ s = JSON.parse(txt); }catch(e){ toast('JSON invalide','crit'); return; }
-  if(!s || !Array.isArray(s.platforms) || !Array.isArray(s.teams)){ toast('Format inattendu : export Passerelle requis','crit'); return; }
-  s.version = 1;
-  state = normalizeState(s);
+  if(!s || typeof s!=='object' || !Array.isArray(s.platforms) || !Array.isArray(s.teams)){ toast('Format inattendu : export Passerelle requis','crit'); return; }
+  const newer = s.appVersion && versionGt(s.appVersion, APP_VERSION);
+  makeBackup('avant import');
+  try{ state = normalizeState(s); }
+  catch(e){ toast('Import impossible : données trop corrompues ('+e.message+')','crit'); return; }
   saveState(); render();
-  toast('Données importées : '+s.platforms.length+' plateforme'+(s.platforms.length>1?'s':''),'good');
+  toast('Données importées : '+state.platforms.length+' plateforme'+(state.platforms.length>1?'s':''),'good');
+  if(newer) toast('Attention : cet export vient d’une version plus récente de Passerelle ('+s.appVersion+' > '+APP_VERSION+') — certains champs ont pu être ignorés.','crit');
 }
 
 /* ---------- Délégation d'événements ---------- */
@@ -1900,7 +2144,11 @@ document.addEventListener('click', e=>{
     if(a==='add-item' && p){ openModal(itemModal(p.id, actEl.dataset.cat)); return; }
     if(a==='add-action' && p){ openModal(actionModal(p.id)); return; }
     if(a==='del-action' && p){
-      p.actions = p.actions.filter(x=>x.id!==actEl.dataset.act);
+      const act = p.actions.find(x=>x.id===actEl.dataset.act);
+      if(!act) return;
+      if(!confirm('Supprimer l’action « '+act.label+' »'+(act.blocking && !act.done?' (elle est BLOQUANTE)':'')+' ?')) return;
+      p.actions = p.actions.filter(x=>x.id!==act.id);
+      logJ(p, 'Action supprimée : '+act.label+(act.blocking?' (bloquante)':''));
       saveState(); render(); return;
     }
     if(a==='decide' && p){ decide(p, actEl.dataset.d); return; }
@@ -1923,11 +2171,12 @@ document.addEventListener('click', e=>{
       if(t && confirm('Supprimer l’équipe « '+t.name+' » ? Les éléments qui lui sont affectés passeront à « — ».')){
         state.teams = state.teams.filter(x=>x.id!==t.id);
         state.platforms.forEach(pp=>pp.checklist.forEach(i=>{ if(i.team===t.id) i.team=''; }));
+        if(ui.filters.team===t.id) ui.filters.team='';
         closeModal(); saveState(); render(); toast('Équipe supprimée');
       }
       return;
     }
-    if(a==='sync-platform' && p){ syncPlatform(p); return; }
+    if(a==='sync-platform' && p){ syncPlatform(p).catch(e=>{ toast('Erreur inattendue : '+e.message,'crit'); render(); }); return; }
     if(a==='del-dmex' && p){
       const pageId = String(actEl.dataset.page);
       p.dmexPages = p.dmexPages.filter(d=>String(d.id)!==pageId);
@@ -1967,19 +2216,27 @@ document.addEventListener('click', e=>{
     if(a==='hide-seed-banner'){ state.seedBannerHidden = true; saveState(); render(); return; }
     if(a==='load-demo'){ state = buildSeed(); saveState(); render(); toast('Démonstration chargée','good'); return; }
     if(a==='reset-demo'){
-      if(confirm('Remplacer toutes les données par le jeu de démonstration ?')){
+      if(confirm('Remplacer toutes les données par le jeu de démonstration ? (une sauvegarde locale est prise avant)')){
+        makeBackup('avant rechargement de la démo');
         state = buildSeed(); saveState(); render(); toast('Démonstration rechargée','good');
       }
       return;
     }
     if(a==='wipe-all'){
-      if(confirm('Effacer toutes les données ? Cette action est irréversible (pensez à exporter avant).')){
+      if(confirm('Effacer toutes les données ? Une sauvegarde locale est prise avant (Paramètres → Sauvegardes), mais pensez aussi à exporter.')){
+        makeBackup('avant effacement');
         state = blankState();
         state.teams = seedTeams();
         saveState(); location.hash='#/tableau-de-bord'; render(); toast('Données effacées');
       }
       return;
     }
+    if(a==='restore-backup'){
+      const slot = parseInt(actEl.dataset.slot, 10);
+      if(slot && confirm('Restaurer cette sauvegarde ? L’état actuel sera d’abord sauvegardé.')) restoreBackup(slot);
+      return;
+    }
+    if(a==='make-backup'){ makeBackup('manuelle'); render(); toast('Sauvegarde locale créée','good'); return; }
     if(a==='export-download'){ downloadExport(); return; }
     if(a==='export-copy'){ copyExport(); return; }
     if(a==='import-apply'){ const ta=$('#io-area'); if(ta && ta.value.trim()) importData(ta.value); else toast('Collez d’abord un export JSON dans la zone de texte','crit'); return; }
@@ -2009,6 +2266,7 @@ document.addEventListener('submit', e=>{
       Object.assign(p, {name:val('name'), type:val('type'), criticality:val('criticality'),
         owner:val('owner'), sponsor:val('sponsor'), targetDate:val('targetDate'),
         goLiveDate:val('goLiveDate'), description:val('description')});
+      logJ(p, 'Fiche modifiée.');
       closeModal(); saveState(); render(); toast('Modifications enregistrées','good');
     }else{
       const p = newPlatform({name:val('name'), type:val('type'), criticality:val('criticality'),
@@ -2016,6 +2274,7 @@ document.addEventListener('submit', e=>{
         goLiveDate:val('goLiveDate'), description:val('description')});
       logJ(p, 'Fiche créée.');
       state.platforms.push(p);
+      state.seeded = false; /* données réelles présentes : le bandeau démo disparaît */
       closeModal(); saveState();
       location.hash = '#/plateforme/'+p.id;
       render(); toast('Plateforme créée : checklist initialisée ('+p.checklist.length+' éléments)','good');
@@ -2083,14 +2342,26 @@ document.addEventListener('change', e=>{
     state.settings.readyThreshold = v; saveState(); render(); toast('Seuil de préparation : '+v+' %');
     return;
   }
-  if(k==='int-relay'){ state.integrations.relayUrl = el.value.trim(); saveState(); toast('URL du relais enregistrée'); return; }
-  if(k==='int-site'){ state.integrations.siteUrl = el.value.trim(); saveState(); toast('URL Atlassian enregistrée'); return; }
+  if(k==='int-relay'){
+    const v = el.value.trim();
+    if(v && !/^https?:\/\//i.test(v)){ toast('URL du relais invalide : elle doit commencer par http(s)://','crit'); return; }
+    state.integrations.relayUrl = v; saveState(); toast('URL du relais enregistrée'); return;
+  }
+  if(k==='int-site'){
+    const v = el.value.trim();
+    if(v && !/^https?:\/\//i.test(v)){ toast('URL Atlassian invalide : elle doit commencer par https://','crit'); return; }
+    state.integrations.siteUrl = v; saveState(); toast('URL Atlassian enregistrée'); return;
+  }
   if(k==='int-label'){ state.integrations.dmexLabel = el.value.trim()||'asset-dip'; saveState(); toast('Label DMEX : '+state.integrations.dmexLabel); return; }
+  if(k==='int-token'){ state.integrations.relayToken = el.value.trim(); saveState(); toast(state.integrations.relayToken?'Jeton d’accès au relais enregistré':'Jeton d’accès au relais retiré'); return; }
+  if(k==='user-name'){ state.settings.userName = el.value.trim(); saveState(); toast(state.settings.userName?'Signature : '+state.settings.userName:'Signature retirée'); return; }
   if(p){
-    if(k==='jira-jql'){ p.jiraJql = el.value.trim(); saveState(); render(); return; }
+    /* Commits sans re-rendu : rien d'autre ne dépend visuellement de ces champs,
+       et re-rendre ici « avale » le clic qui suit la saisie (blur → DOM reconstruit) */
+    if(k==='jira-jql'){ p.jiraJql = el.value.trim(); saveState(); return; }
     const it = el.dataset.item ? p.checklist.find(i=>i.id===el.dataset.item) : null;
-    if(k==='item-team' && it){ it.team = el.value; saveState(); render(); }
-    if(k==='item-due' && it){ it.due = el.value; saveState(); render(); }
+    if(k==='item-team' && it){ it.team = el.value; saveState(); }
+    if(k==='item-due' && it){ it.due = el.value; saveState(); }
     if(k==='item-comment' && it){ it.comment = el.value.trim(); ui.comments[p.id+':'+it.id]=false; saveState(); render(); }
     if(k==='toggle-action'){
       const a = p.actions.find(x=>x.id===el.dataset.act);
@@ -2127,6 +2398,16 @@ document.addEventListener('keydown', e=>{
 });
 
 window.addEventListener('hashchange', render);
+
+/* Multi-onglets : si un autre onglet écrit l'état, on le recharge au lieu de l'écraser */
+window.addEventListener('storage', e=>{
+  if(e.key !== LS_KEY || suppressStorageEvent || e.newValue == null) return;
+  const fresh = loadState();
+  if(!fresh) return;
+  state = normalizeState(fresh);
+  render();
+  toast('Données mises à jour depuis un autre onglet');
+});
 
 /* ---------- Démarrage ---------- */
 

@@ -21,14 +21,28 @@ jetons Atlassian expirent au bout d'un an maximum : prévoir la rotation.
 """
 import argparse
 import base64
+import hmac
 import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlsplit
+
+VERSION = '1.3.0'
+MAX_BODY = 5 * 1024 * 1024  # taille maximale d'une réponse amont relayée
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Ne jamais suivre une redirection : l'Authorization ne doit pas suivre un Location."""
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+OPENER = urllib.request.build_opener(_NoRedirect)
 
 # Chemins amont autorisés (regex ancrées, évaluées sur le chemin DÉCODÉ)
 ALLOWED = [re.compile(p) for p in (
@@ -60,9 +74,14 @@ def parse_config():
                     help="ajoute Access-Control-Allow-Origin:* (uniquement si l'app est ouverte en file://)")
     args = ap.parse_args()
 
+    if args.open_cors and args.host not in ('127.0.0.1', 'localhost', '::1'):
+        sys.exit('--open-cors est réservé à un usage local (127.0.0.1) : ne l’exposez pas au réseau '
+                 '(toute page web visitée pourrait lire Jira à travers le relais).')
+
     site = os.environ.get('ATL_SITE', '').rstrip('/')
     email = os.environ.get('ATL_EMAIL', '')
     token = os.environ.get('ATL_TOKEN', '')
+    access_token = os.environ.get('RELAY_ACCESS_TOKEN', '')
     missing = [n for n, v in (('ATL_SITE', site), ('ATL_EMAIL', email), ('ATL_TOKEN', token)) if not v]
     if missing:
         sys.exit('Variables d’environnement manquantes : ' + ', '.join(missing) +
@@ -78,24 +97,43 @@ def parse_config():
         sys.exit('Application introuvable : ' + app_path)
 
     auth = 'Basic ' + base64.b64encode((email + ':' + token).encode()).decode()
-    return args, {'site': site, 'auth': auth, 'app': app_path, 'open_cors': args.open_cors}
+    return args, {'site': site, 'auth': auth, 'app': app_path, 'open_cors': args.open_cors,
+                  'access_token': access_token}
+
+
+CSP = ("default-src 'none'; script-src 'unsafe-inline'; "
+       "style-src 'unsafe-inline' https://fonts.googleapis.com; "
+       "font-src https://fonts.gstatic.com; img-src 'self' data:; "
+       "connect-src 'self'; base-uri 'none'; form-action 'self'")
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'PasserelleRelay/1.1'
+    server_version = 'PasserelleRelay/' + VERSION
     protocol_version = 'HTTP/1.1'
 
     def log_message(self, fmt, *fmt_args):
         # Jamais de query string dans les logs (la JQL peut contenir des noms internes)
-        sys.stderr.write('%s - %s %s\n' % (self.address_string(), self.command, urlsplit(self.path).path))
+        sys.stderr.write('%s %s - %s\n' % (time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+                                           self.address_string(), fmt % fmt_args))
+
+    def log_request(self, code='-', size='-'):
+        # Horodatage + code de statut, chemin sans query string
+        self.log_message('%s %s %s', self.command, urlsplit(self.path).path, str(code))
 
     def _send(self, code, body, ctype='application/json; charset=utf-8', extra=()):
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        if ctype.startswith('text/html'):
+            self.send_header('Content-Security-Policy', CSP)
+            self.send_header('X-Frame-Options', 'DENY')
         if CONFIG['open_cors']:
             self.send_header('Access-Control-Allow-Origin', '*')
+            if CONFIG['access_token']:
+                self.send_header('Access-Control-Allow-Headers', 'X-Relay-Token, Accept')
         for k, v in extra:
             self.send_header(k, v)
         self.end_headers()
@@ -112,8 +150,20 @@ class Handler(BaseHTTPRequestHandler):
             with open(CONFIG['app'], 'rb') as f:
                 return self._send(200, f.read(), 'text/html; charset=utf-8')
 
+        if path == '/healthz':
+            return self._send(200, json.dumps({
+                'ok': True, 'version': VERSION,
+                'upstream': bool(CONFIG['site']), 'auth_required': bool(CONFIG['access_token']),
+            }).encode())
+
         if not path.startswith('/atlassian/'):
             return self._err(404, 'Chemin inconnu. L’API est sous /atlassian/…, l’application sous /.')
+
+        if CONFIG['access_token']:
+            supplied = self.headers.get('X-Relay-Token', '')
+            if not hmac.compare_digest(supplied, CONFIG['access_token']):
+                return self._err(403, 'Jeton d’accès au relais manquant ou invalide (en-tête X-Relay-Token — '
+                                      'à renseigner dans Paramètres → Intégration Atlassian).')
 
         upstream_path = path[len('/atlassian'):]
         if '..' in upstream_path or '\\' in upstream_path or '\x00' in upstream_path or '//' in upstream_path:
@@ -129,13 +179,15 @@ class Handler(BaseHTTPRequestHandler):
             'User-Agent': self.server_version,
         })
         try:
-            with urllib.request.urlopen(req, timeout=15) as up:
-                body = up.read()
+            with OPENER.open(req, timeout=15) as up:
+                body = up.read(MAX_BODY + 1)
+                if len(body) > MAX_BODY:
+                    return self._err(502, 'Relais : réponse amont trop volumineuse (> 5 Mo).')
                 ctype = up.headers.get('Content-Type', 'application/json')
                 extra = [(k, up.headers[k]) for k in PASS_HEADERS if up.headers.get(k)]
                 return self._send(up.status, body, ctype, extra)
         except urllib.error.HTTPError as e:
-            body = e.read()
+            body = e.read(MAX_BODY)
             ctype = e.headers.get('Content-Type', 'application/json')
             extra = [(k, e.headers[k]) for k in PASS_HEADERS if e.headers.get(k)]
             return self._send(e.code, body, ctype, extra)
@@ -158,7 +210,9 @@ def main():
     CONFIG.update(conf)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
-    print('Passerelle : http://%s:%d/  →  %s  (GET uniquement, liste blanche)' % (args.host, args.port, CONFIG['site']))
+    print('Passerelle v%s : http://%s:%d/  →  %s  (GET uniquement, liste blanche%s)'
+          % (VERSION, args.host, args.port, CONFIG['site'],
+             ', jeton d’accès requis' if CONFIG['access_token'] else ''))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
