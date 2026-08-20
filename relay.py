@@ -40,6 +40,7 @@ ALLOWED = [re.compile(p) for p in (
     r'^/wiki/api/v2/spaces/[0-9]+$',   # espace par id
     r'^/wiki/rest/api/user/current$',  # test de connexion Confluence
     r'^/wiki/rest/api/user$',          # ?accountId=… → nom de l'auteur
+    r'^/wiki/rest/api/content/search$',# recherche CQL (pages DMEX par label)
 )]
 
 # Seuls en-têtes amont relayés au navigateur (jamais WWW-Authenticate ni Set-Cookie)

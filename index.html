@@ -630,7 +630,7 @@ function blankState(){
   return {
     version:1, seeded:false, seedBannerHidden:false,
     settings:{readyThreshold:90},
-    integrations:{relayUrl:'', siteUrl:''},
+    integrations:{relayUrl:'', siteUrl:'', dmexLabel:'asset-dip'},
     teams:[], platforms:[],
     createdAt:new Date().toISOString(),
   };
@@ -640,7 +640,7 @@ const BLANK_SYNC = () => ({at:'', jiraError:'', dmexError:'', partial:false, mor
 
 function normalizeState(s){
   s.settings = Object.assign({readyThreshold:90}, s.settings||{});
-  s.integrations = Object.assign({relayUrl:'', siteUrl:''}, s.integrations||{});
+  s.integrations = Object.assign({relayUrl:'', siteUrl:'', dmexLabel:'asset-dip'}, s.integrations||{});
   (s.platforms||[]).forEach(p=>{
     p.checklist = p.checklist||[]; p.actions = p.actions||[]; p.journal = p.journal||[];
     p.gonogo = p.gonogo||{decision:null,date:'',comment:''};
@@ -971,6 +971,39 @@ async function confluencePageMeta(pageIds){
     when: (pg.version && pg.version.createdAt) || '',
     url: '',
   }));
+}
+
+/* Recherche des pages DMEX par label Confluence (CQL v1 — seul endpoint de recherche) */
+async function confluenceLabelSearch(text){
+  const label = (state.integrations.dmexLabel||'asset-dip').replace(/"/g,'');
+  let cql = 'type = page AND label = "'+label+'"';
+  const t = String(text||'').trim().replace(/"/g,'');
+  if(t) cql += ' AND title ~ "'+t+'"';
+  cql += ' ORDER BY lastmodified DESC';
+  const data = await atlFetch('/wiki/rest/api/content/search?limit=25&expand=version,space&cql='+encodeURIComponent(cql));
+  const base = (data._links && data._links.base) || (siteBase() ? siteBase()+'/wiki' : '');
+  return (data.results||[]).map(r=>({
+    id: String(r.id),
+    title: r.title || ('Page '+r.id),
+    space: (r.space && (r.space.name || r.space.key)) || '',
+    version: (r.version && r.version.number) || 0,
+    by: (r.version && r.version.by && r.version.by.displayName) || '',
+    when: (r.version && r.version.when) ? fixTZ(r.version.when) : '',
+    url: (base && r._links && r._links.webui) ? base + r._links.webui : '',
+  }));
+}
+
+let dmexSearch = {pid:null, items:[], q:'', state:'idle', error:''};
+
+async function runDmexSearch(p, q){
+  dmexSearch = {pid:p.id, items:[], q:String(q||''), state:'loading', error:''};
+  const zone = $('#dmex-results');
+  if(zone) zone.innerHTML = dmexResultsHtml(p);
+  try{ dmexSearch.items = await confluenceLabelSearch(q); dmexSearch.state='done'; }
+  catch(e){ dmexSearch.error = e.message; dmexSearch.state='done'; }
+  if(dmexSearch.pid !== p.id) return;
+  const z2 = $('#dmex-results');
+  if(z2) z2.innerHTML = dmexResultsHtml(p);
 }
 
 const syncing = {};
@@ -1478,7 +1511,8 @@ function cardDmex(p){
     (p.dmexPages.length?'<span class="cat-count">'+p.dmexPages.length+' page'+(p.dmexPages.length>1?'s':'')+'</span>':'')+'</div>';
   html += '<form class="note-form" data-submit="add-dmex" data-id="'+esc(p.id)+'">'+
     '<input name="url" placeholder="Coller l’URL d’une page Confluence (…/wiki/spaces/…/pages/…)" autocomplete="off">'+
-    '<button class="btn" type="submit">Ajouter</button></form>';
+    '<button class="btn" type="submit">Ajouter</button>'+
+    '<button class="btn" type="button" data-action="dmex-search-open" data-id="'+esc(p.id)+'" title="Rechercher les pages portant le label DMEX">'+icon('search')+'Rechercher</button></form>';
   if(s.dmexError) html += '<div class="int-error">'+esc(s.dmexError)+'</div>';
   if(p.dmexPages.length){
     const metaById = {}; s.pages.forEach(m=>{ metaById[String(m.id)] = m; });
@@ -1497,9 +1531,37 @@ function cardDmex(p){
       '</div>';
     }).join('');
   } else {
-    html += '<p class="empty-note">Rattachez ici les pages Confluence du DMEX : elles s’affichent avec leur version, leur auteur et leur dernière mise à jour.</p>';
+    html += '<p class="empty-note">Rattachez ici les pages Confluence du DMEX : collez une URL ou recherchez-les par label. Elles s’affichent avec leur version, leur auteur et leur dernière mise à jour.</p>';
   }
   return html+'</div>';
+}
+
+function dmexResultsHtml(p){
+  if(dmexSearch.state==='loading') return '<p class="empty-note">Recherche en cours…</p>';
+  if(dmexSearch.error) return '<div class="int-error" style="margin:0">'+esc(dmexSearch.error)+'</div>';
+  if(dmexSearch.state==='idle') return '';
+  if(!dmexSearch.items.length) return '<p class="empty-note" style="padding:10px 0">Aucune page trouvée avec ce label'+(dmexSearch.q?' et ce filtre de titre':'')+'.</p>';
+  return dmexSearch.items.map(m=>{
+    const attached = p.dmexPages.some(d=>String(d.id)===m.id);
+    return '<div class="dmex-row" style="padding:9px 0"><div class="dmex-main">'+
+      '<div class="dmex-title">'+(m.url?'<a href="'+esc(m.url)+'" target="_blank" rel="noopener">'+esc(m.title)+'</a>':esc(m.title))+'</div>'+
+      '<div class="dmex-meta">'+esc(m.space||'—')+' · v.'+m.version+(m.by?' · par '+esc(m.by):'')+(m.when?' · le '+fmtD(String(m.when).slice(0,10)):'')+'</div></div>'+
+      (attached ? chip('Rattachée','good')
+        : '<button class="btn btn-s" data-action="dmex-attach" data-id="'+esc(p.id)+'" data-page="'+esc(m.id)+'">'+icon('plus')+'Ajouter</button>')+
+    '</div>';
+  }).join('');
+}
+
+function dmexSearchModal(p){
+  const label = state.integrations.dmexLabel||'asset-dip';
+  return '<div class="m-head"><h2>Rechercher les pages DMEX</h2>'+
+    '<button class="icon-btn" data-action="close-modal" aria-label="Fermer">✕</button></div>'+
+    '<div class="m-body">'+
+    '<p class="tiny muted" style="margin-bottom:10px">Pages Confluence portant le label <span class="chip stage">'+esc(label)+'</span> (modifiable dans Paramètres), les plus récentes d’abord.</p>'+
+    '<form data-submit="dmex-search" data-id="'+esc(p.id)+'" style="display:flex; gap:8px; margin-bottom:12px">'+
+      '<input name="q" value="'+esc(dmexSearch.q)+'" placeholder="Filtrer par titre (optionnel)" style="flex:1" autocomplete="off">'+
+      '<button class="btn btn-primary" type="submit">Rechercher</button></form>'+
+    '<div id="dmex-results">'+dmexResultsHtml(p)+'</div></div>';
 }
 
 /* ---------- Vue : équipes ---------- */
@@ -1553,6 +1615,8 @@ function vSettings(){
     '<input id="int-relay" data-change="int-relay" value="'+esc(it.relayUrl)+'" placeholder="http://relais-interne:8765" style="min-width:280px" class="mono"></div>'+
     '<div class="set-row"><label for="int-site">URL du site Atlassian (pour les liens vers les tickets)</label>'+
     '<input id="int-site" data-change="int-site" value="'+esc(it.siteUrl)+'" placeholder="https://mon-entreprise.atlassian.net" style="min-width:280px" class="mono"></div>'+
+    '<div class="set-row"><label for="int-label">Label Confluence des pages DMEX</label>'+
+    '<input id="int-label" data-change="int-label" value="'+esc(it.dmexLabel||'asset-dip')+'" placeholder="asset-dip" style="min-width:160px" class="mono"></div>'+
     '<div class="set-row">'+
       '<button class="btn" data-action="test-atl" data-kind="jira">Tester Jira</button>'+
       '<button class="btn" data-action="test-atl" data-kind="confluence">Tester Confluence</button>'+
@@ -1871,6 +1935,25 @@ document.addEventListener('click', e=>{
       saveState(); render(); toast('Page DMEX retirée');
       return;
     }
+    if(a==='dmex-search-open' && p){
+      dmexSearch = {pid:p.id, items:[], q:'', state:'loading', error:''};
+      openModal(dmexSearchModal(p));
+      runDmexSearch(p, '');
+      return;
+    }
+    if(a==='dmex-attach' && p){
+      const m = dmexSearch.items.find(x=>x.id===String(actEl.dataset.page));
+      if(m && !p.dmexPages.some(d=>String(d.id)===m.id)){
+        p.dmexPages.push({url:m.url, id:m.id});
+        p.sync.pages = p.sync.pages.filter(x=>String(x.id)!==m.id).concat([Object.assign({}, m)]);
+        logJ(p, 'Page DMEX rattachée depuis la recherche par label : '+m.title);
+        saveState(); render();
+        const zone = $('#dmex-results');
+        if(zone) zone.innerHTML = dmexResultsHtml(p);
+        toast('Page rattachée');
+      }
+      return;
+    }
     if(a==='test-atl'){
       const kind = actEl.dataset.kind;
       ui.test[kind] = {msg:'test en cours…', pending:true};
@@ -1981,6 +2064,10 @@ document.addEventListener('submit', e=>{
     saveState(); render();
     toast('Page ajoutée — synchronisez pour récupérer ses informations');
   }
+  if(kind==='dmex-search'){
+    const p = state.platforms.find(x=>x.id===f.dataset.id);
+    if(p) runDmexSearch(p, val('q'));
+  }
 });
 
 document.addEventListener('change', e=>{
@@ -1998,6 +2085,7 @@ document.addEventListener('change', e=>{
   }
   if(k==='int-relay'){ state.integrations.relayUrl = el.value.trim(); saveState(); toast('URL du relais enregistrée'); return; }
   if(k==='int-site'){ state.integrations.siteUrl = el.value.trim(); saveState(); toast('URL Atlassian enregistrée'); return; }
+  if(k==='int-label'){ state.integrations.dmexLabel = el.value.trim()||'asset-dip'; saveState(); toast('Label DMEX : '+state.integrations.dmexLabel); return; }
   if(p){
     if(k==='jira-jql'){ p.jiraJql = el.value.trim(); saveState(); render(); return; }
     const it = el.dataset.item ? p.checklist.find(i=>i.id===el.dataset.item) : null;

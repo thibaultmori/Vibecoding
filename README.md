@@ -51,7 +51,7 @@ Modifier `TEMPLATE` ne touche que les plateformes créées ensuite ; les fiches 
 
 ## Intégration Jira & Confluence (Cloud)
 
-Chaque fiche plateforme peut afficher **les tickets Jira** de son chantier (champ JQL + bouton « Synchroniser ») et **les pages Confluence de son DMEX** (coller l'URL des pages : titre, espace, version, auteur et date de dernière mise à jour sont récupérés ; une page non modifiée depuis plus de 6 mois est signalée).
+Chaque fiche plateforme peut afficher **les tickets Jira** de son chantier (champ JQL + bouton « Synchroniser ») et **les pages Confluence de son DMEX** : collez l'URL des pages, ou cliquez sur **« Rechercher »** pour retrouver directement les pages portant le **label DMEX** (par défaut `asset-dip`, modifiable dans Paramètres) et les rattacher en un clic. Titre, espace, version, auteur et date de dernière mise à jour sont récupérés ; une page non modifiée depuis plus de 6 mois est signalée.
 
 ### Pourquoi un relais ?
 
@@ -72,7 +72,7 @@ Ensuite, dans l'application : **Paramètres → Intégration Atlassian** — lai
 
 ### Sécurité
 
-- Le relais n'accepte que des **GET** sur une **liste blanche stricte** de chemins (recherche JQL, lecture de pages/espaces, tests de connexion) ; l'hôte amont est fixe (`ATL_SITE`) ; aucun en-tête du navigateur n'est transmis à Atlassian ; le jeton n'apparaît jamais dans les journaux.
+- Le relais n'accepte que des **GET** sur une **liste blanche stricte** de chemins (recherche JQL, lecture de pages/espaces, recherche de pages par label, tests de connexion) ; l'hôte amont est fixe (`ATL_SITE`) ; aucun en-tête du navigateur n'est transmis à Atlassian ; le jeton n'apparaît jamais dans les journaux.
 - Utilisez un **compte de service en lecture seule**, limité aux projets Jira et espaces Confluence utiles.
 - Les jetons API Atlassian **expirent au bout d'un an au maximum** : prévoyez la rotation (symptôme : erreur 401 à la synchronisation).
 - Par défaut le relais n'écoute que sur `127.0.0.1`. Si vous l'exposez au réseau (`--host 0.0.0.0`), toute machine pouvant le joindre lit Jira/Confluence avec les droits du jeton : réservez l'accès au réseau de la direction.
