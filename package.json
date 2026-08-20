@@ -1,0 +1,14 @@
+{
+  "name": "passerelle",
+  "version": "1.3.0",
+  "private": true,
+  "description": "Gestion des mises en exploitation de plateformes — Direction Infrastructures & Production",
+  "scripts": {
+    "test": "npm run test:e2e && npm run test:relay",
+    "test:e2e": "node tests/e2e.js",
+    "test:relay": "bash tests/relay.sh"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

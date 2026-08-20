@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Vérification de syntaxe (JS extrait + Python)
+        run: |
+          python3 - <<'EOF'
+          import re
+          src = open('index.html', encoding='utf-8').read()
+          m = re.search(r'<script>(.*)</script>', src, re.S)
+          open('app-extracted.js', 'w', encoding='utf-8').write(m.group(1))
+          EOF
+          node --check app-extracted.js
+          python3 -B -m py_compile relay.py
+
+      - name: Installation des dépendances de test
+        run: npm ci
+
+      - name: Installation de Chromium (Playwright)
+        run: npx playwright install --with-deps chromium
+
+      - name: Tests de bout en bout (application)
+        run: npm run test:e2e
+
+      - name: Tests du relais Atlassian
+        run: npm run test:relay
