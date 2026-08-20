@@ -24,7 +24,7 @@ jobs:
           open('app-extracted.js', 'w', encoding='utf-8').write(m.group(1))
           EOF
           node --check app-extracted.js
-          python3 -B -m py_compile relay.py
+          python3 -B -m py_compile relay.py server.py
 
       - name: Installation des dépendances de test
         run: npm ci
@@ -37,3 +37,6 @@ jobs:
 
       - name: Tests du relais Atlassian
         run: npm run test:relay
+
+      - name: Tests du serveur partagé (API, rôles, SSE)
+        run: npm run test:server

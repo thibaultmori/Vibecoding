@@ -3,6 +3,9 @@
    Chromium : celui de Playwright, ou CHROMIUM_PATH pour un binaire local. */
 'use strict';
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { spawn } = require('child_process');
 const { chromium } = require('playwright');
 
 const APP_URL = 'file://' + path.resolve(__dirname, '..', 'index.html');
@@ -334,6 +337,79 @@ function check(name, cond, detail) {
   await page.reload();
   await page.waitForTimeout(400);
   check('mobile : pas de débordement horizontal', await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1) === true);
+
+  /* ---------- 12. Mode serveur : référentiel partagé multi-utilisateurs ---------- */
+  const SRV_URL = 'http://127.0.0.1:18811';
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pmee-e2e-'));
+  const srv = spawn('python3', [path.resolve(__dirname, '..', 'server.py'), '--port', '18811'],
+    { env: { ...process.env, DATA_DIR: dataDir, ADMIN_EMAILS: 'admin@test', WRITE_EMAILS: 'alice@test,admin@test' }, stdio: 'ignore' });
+  let srvUp = false;
+  for (let i = 0; i < 40; i++) {
+    try { const r = await fetch(SRV_URL + '/healthz'); if (r.ok) { srvUp = true; break; } } catch (e) {}
+    await new Promise(r => setTimeout(r, 200));
+  }
+  check('serveur v2 démarré', srvUp);
+
+  const ctxAlice = await browser.newContext({ viewport: { width: 1400, height: 900 },
+    extraHTTPHeaders: { 'X-Auth-Request-Email': 'alice@test', 'X-Auth-Request-Preferred-Username': 'Alice Martin' } });
+  const ctxBob = await browser.newContext({ viewport: { width: 1400, height: 900 },
+    extraHTTPHeaders: { 'X-Auth-Request-Email': 'bob@test', 'X-Auth-Request-Preferred-Username': 'Bob Durand' } });
+  const pa = await ctxAlice.newPage();
+  const pb = await ctxBob.newPage();
+  pa.on('pageerror', e => errors.push('srv-alice: ' + e.message));
+  pb.on('pageerror', e => errors.push('srv-bob: ' + e.message));
+  pa.on('dialog', d => d.accept());
+  pb.on('dialog', d => d.accept());
+
+  await pa.goto(SRV_URL + '/');
+  await pa.waitForTimeout(900);
+  check('Alice en mode serveur (contributrice)', (await pa.locator('#side-foot').textContent()).includes('Alice Martin'));
+
+  await pa.click('button[data-action="new-platform"]');
+  await pa.waitForTimeout(200);
+  await pa.fill('#fp-name', 'Plateforme multi-utilisateurs');
+  await pa.click('.modal button[type="submit"]');
+  await pa.waitForTimeout(900);
+  const srvState = await (await fetch(SRV_URL + '/api/state', { headers: { 'X-Auth-Request-Email': 'admin@test' } })).json();
+  check('fiche persistée côté serveur', srvState.platforms.length === 1 && srvState.platforms[0].updatedBy === 'Alice Martin',
+    JSON.stringify(srvState.platforms.map(p => p.updatedBy)));
+
+  await pb.goto(SRV_URL + '/#/plateformes');
+  await pb.waitForTimeout(900);
+  check('Bob (lecteur) voit la fiche d’Alice', (await pb.locator('#view').textContent()).includes('Plateforme multi-utilisateurs'));
+  check('Bob : bouton « Nouvelle plateforme » masqué', await pb.locator('button[data-action="new-platform"]').count() === 0);
+
+  await pb.click('table.plist tbody tr:first-child');
+  await pb.waitForTimeout(400);
+  await pb.locator('.cat.open .item .chip.st').first().click();
+  await pb.waitForTimeout(300);
+  check('Bob : modification refusée (lecture seule)', (await pb.locator('#toast-zone').textContent()).includes('Lecture seule'));
+
+  /* SSE : Alice renomme, Bob voit le nouveau nom sans recharger */
+  await pb.goto(SRV_URL + '/#/plateformes');
+  await pb.waitForTimeout(500);
+  await pa.click('button[data-action="edit-platform"]');
+  await pa.waitForTimeout(250);
+  await pa.fill('#fp-name', 'Plateforme renommée en direct');
+  await pa.click('.modal button[type="submit"]');
+  await pa.waitForTimeout(1600);
+  check('SSE : Bob voit le renommage en direct', (await pb.locator('#view').textContent()).includes('Plateforme renommée en direct'));
+
+  /* Conflit : une écriture avec une révision périmée est rejetée puis rechargée */
+  const conflict = await pa.evaluate(async () => {
+    const st = await (await fetch('/api/state', { headers: { Accept: 'application/json' } })).json();
+    const p = st.platforms[0];
+    const r = await fetch('/api/platforms/' + encodeURIComponent(p.data.id), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rev: 0, data: Object.assign({}, p.data, { name: 'écrasement périmé' }) }),
+    });
+    return r.status;
+  });
+  check('conflit de révision → 409', conflict === 409, conflict);
+
+  await ctxAlice.close();
+  await ctxBob.close();
+  srv.kill();
 
   /* ---------- Bilan ---------- */
   const realErrors = errors.filter(e => !e.includes('ERR_CONNECTION') && !e.includes('ERR_FAILED') && !e.includes('status of 400') && !e.includes('ERR_NAME_NOT_RESOLVED'));

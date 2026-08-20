@@ -1,5 +1,19 @@
 # Journal des versions — Passerelle
 
+## 2.0.0 — 2026-08-20 · Référentiel partagé multi-utilisateurs (phase 1)
+
+Le passage en production : les données quittent le navigateur de chacun pour un référentiel commun, authentifié et supervisé.
+
+- **`server.py`** (nouveau, Python standard — aucun paquet) : un seul service qui sert le front, expose l'API REST sur **SQLite (WAL)** et intègre le relais Atlassian (même liste blanche que `relay.py`, accès authentifié).
+- **Front double mode** : servie par `server.py`, l'application bascule automatiquement en mode partagé (l'interface et les gestes ne changent pas) ; ouverte en fichier ou via `relay.py`, elle reste en mode local v1.
+- **Concurrence optimiste** : révision par fiche, conflit → 409, rechargement automatique de la version courante avec le nom de l'auteur.
+- **Temps réel (SSE)** : les créations, modifications et suppressions des autres utilisateurs apparaissent en direct, reconnexion avec resynchronisation.
+- **Identité SSO** (oauth2-proxy / Entra ID, en-têtes configurables) : journal et décisions Go/No-Go signés automatiquement, **audit nominatif côté serveur** (qui / quoi / quand, consultable via `/api/audit`).
+- **Rôles** : admin / contributeur / lecteur (`ADMIN_EMAILS`, `WRITE_EMAILS`) — appliqués par l'API et reflétés dans l'interface (lecture seule, réglages communs réservés aux administrateurs).
+- **Migration en un clic** : l'export JSON v1 s'importe tel quel (Paramètres → Importer, administrateurs) ; l'export v2 reste compatible v1.
+- **Exploitation** : `/healthz`, `/metrics` (Prometheus), journaux JSON (sans query string), sauvegarde SQLite quotidienne compressée avec rétention (`BACKUP_KEEP`), sauvegarde avant chaque import, `Dockerfile` + `docker-compose.yml` (oauth2-proxy inclus en exemple).
+- **Tests** : 33 contrôles API/rôles/SSE (`tests/server.sh`) et scénario Playwright multi-utilisateurs réel (deux navigateurs : propagation SSE en direct, lecture seule appliquée, conflit 409) — 98 contrôles automatisés au total en CI.
+
 ## 1.3.0 — 2026-08-20 · Durcissement « prod ready » (phase 0)
 
 Robustesse et intégrité des données :

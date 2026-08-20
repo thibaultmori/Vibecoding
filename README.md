@@ -2,11 +2,22 @@
 
 Interface de gestion des **mises en exploitation de nouvelles plateformes** pour les équipes de la Direction Infrastructures & Production.
 
-Application web autonome : **un seul fichier HTML**, aucune dépendance, aucun serveur requis — sauf pour l'intégration Jira/Confluence, qui s'appuie sur un petit relais fourni (`relay.py`, Python 3 standard). Les données sont stockées localement dans le navigateur (localStorage) et s'échangent par export/import JSON.
+Deux modes d'exécution, avec la même interface :
+
+- **Mode partagé (v2, recommandé pour une équipe)** : `server.py` — un seul service Python standard (aucun paquet) qui sert l'application, stocke les données dans un **référentiel commun** (SQLite sauvegardée), applique des **rôles** (admin / contributeur / lecteur), signe chaque geste avec l'**identité SSO** (oauth2-proxy / Entra ID) et diffuse les modifications **en temps réel** à tous les navigateurs connectés.
+- **Mode local (v1)** : `index.html` seul, zéro dépendance, données dans le navigateur (localStorage) + `relay.py` pour l'intégration Atlassian — parfait pour découvrir l'outil ou un usage individuel.
 
 ## Démarrage
 
-Trois options, de la plus simple à la plus partagée :
+**Mode partagé (équipe)** :
+
+```bash
+docker compose up -d        # image + volume de données + oauth2-proxy (voir docker-compose.yml)
+```
+
+ou sans Docker : `ADMIN_EMAILS=chef@… python3 server.py` derrière votre proxy SSO — détails, variables et sécurité dans `EXPLOITATION.md`. Pour une maquette sans SSO : `AUTH_MODE=none python3 server.py --port 8080` puis `http://localhost:8080`. La migration depuis le mode local se fait en un clic : export JSON → Paramètres → Importer.
+
+**Mode local (individuel)** :
 
 1. **Ouvrir le fichier** : double-cliquez sur `index.html` — l'application démarre avec un jeu de démonstration.
 2. **Servir en local** : `python3 -m http.server` dans le dossier, puis `http://localhost:8000`.
@@ -102,12 +113,12 @@ La page publiée en Artifact bloque tout appel réseau : la synchronisation y é
 
 ## Qualité
 
-- Suite de tests versionnée : `npm install` puis `npm test` (57 contrôles applicatifs Playwright dans `tests/e2e.js` + 24 contrôles du relais dans `tests/relay.sh`).
-- Intégration continue GitHub Actions (`.github/workflows/ci.yml`) : syntaxe, tests de bout en bout et tests du relais à chaque push.
+- Suite de tests versionnée : `npm install` puis `npm test` — 98 contrôles : parcours applicatif complet et scénario multi-utilisateurs réel (`tests/e2e.js`, Playwright, deux navigateurs avec SSE), API/rôles/conflits/audit (`tests/server.sh`), relais (`tests/relay.sh`).
+- Intégration continue GitHub Actions (`.github/workflows/ci.yml`) à chaque push.
 - Versions : `CHANGELOG.md` ; la version courante est affichée dans l'application et incluse dans les exports.
 
 ## Limites connues et suite possible
 
-- Les données sont **locales au navigateur** : pas de temps réel multi-utilisateurs. Pour un usage d'équipe, passer par l'export/import JSON, ou faire évoluer l'outil vers une v2 avec backend (API + base) — le modèle de données JSON actuel peut servir de contrat tel quel.
-- Pas d'authentification ni d'historique des modifications au-delà du journal par plateforme.
+- En **mode local**, les données restent propres à chaque navigateur (échange par export/import JSON) — le mode partagé v2 est fait pour l'usage d'équipe.
+- Pas encore de notifications d'échéances, de modèles de checklist administrables dans l'interface ni de recherche globale : phase 2 de la feuille de route. Pilotage historisé et écriture Jira : phase 3.
 - Intégration Atlassian : 50 premiers tickets par JQL (mention affichée au-delà), liens courts Confluence `/wiki/x/…` non résolus (coller l'URL complète), instances Server/Data Center non couvertes (endpoints différents), pas de relance automatique sur limitation 429 (le message affiche le délai à respecter).
