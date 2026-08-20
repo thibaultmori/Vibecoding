@@ -79,6 +79,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
   outline:2px solid var(--accent); outline-offset:2px;
 }
 ::placeholder{color:var(--ink3)}
+input:disabled,select:disabled,textarea:disabled{opacity:.55; cursor:not-allowed}
 .mono{font-family:var(--mono); font-variant-numeric:tabular-nums}
 .muted{color:var(--ink2)}
 .tiny{font-size:12px}
@@ -496,7 +497,15 @@ textarea.io{width:100%; min-height:110px; font-family:var(--mono); font-size:12p
    Application autonome : aucune dépendance, stockage local navigateur.
    ================================================================= */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '2.0.0';
+
+/* Mode serveur (v2) : détecté au démarrage si la page est servie par server.py.
+   Sinon, l'application reste en mode local (localStorage), comme en v1. */
+let serverMode = false;
+let me = null; /* {email, name, role} — identité transmise par le proxy SSO */
+const INSTANCE_ID = 'i' + Math.random().toString(36).slice(2, 10);
+const shadow = {plat:{}, teams:'', settings:''};
+const revs = {plat:{}, teams:0, settings:0};
 
 /* ---------- Constantes métier ---------- */
 
@@ -639,6 +648,7 @@ let lastHash = null;
 let suppressStorageEvent = false;
 function saveState(){
   state.updatedAt = new Date().toISOString();
+  if(serverMode){ pushChanges(); return; }
   try{
     suppressStorageEvent = true;
     localStorage.setItem(LS_KEY, JSON.stringify(state));
@@ -711,6 +721,212 @@ function lsUsage(){
     }
   }catch(e){}
   return bytes;
+}
+
+/* ---------- Mode serveur : couche d'accès aux données ---------- */
+
+const canWrite = () => !serverMode || (me && me.role !== 'lecteur');
+const isAdmin  = () => !serverMode || (me && me.role === 'admin');
+
+const MUTATING_ACTIONS = new Set(['new-platform','edit-platform','delete-platform','cycle-item',
+  'add-item','add-action','del-action','decide','clear-decision','set-stage','next-stage',
+  'new-team','edit-team','delete-team','load-demo','reset-demo','wipe-all','import-apply',
+  'restore-backup','make-backup','server-backup','del-dmex','dmex-attach','sync-platform']);
+const ADMIN_CHANGES = new Set(['threshold','int-site','int-label']);
+
+async function api(path, opts){
+  const o = Object.assign({headers:{}}, opts||{});
+  o.headers['Accept'] = 'application/json';
+  o.headers['X-Client-Instance'] = INSTANCE_ID;
+  if(o.body !== undefined){
+    o.headers['Content-Type'] = 'application/json';
+    o.body = JSON.stringify(o.body);
+  }
+  const r = await fetch(path, o);
+  let body = null;
+  try{ body = await r.json(); }catch(e){}
+  if(!r.ok){
+    const e = new Error((body && (body.error||body.message)) || ('HTTP '+r.status));
+    e.status = r.status; e.body = body;
+    throw e;
+  }
+  return body;
+}
+
+const sharedSettings = () => ({
+  readyThreshold: state.settings.readyThreshold,
+  dmexLabel: state.integrations.dmexLabel,
+  siteUrl: state.integrations.siteUrl,
+});
+const sharedSettingsJson = () => JSON.stringify(sharedSettings());
+
+function applySharedSettings(d){
+  d = d || {};
+  state.settings.readyThreshold = parseInt(d.readyThreshold,10) || 90;
+  state.integrations.dmexLabel = String(d.dmexLabel||'asset-dip');
+  state.integrations.siteUrl = safeUrl(d.siteUrl);
+}
+
+async function loadServerState(){
+  const s = await api('/api/state');
+  state = blankState();
+  state.platforms = s.platforms.map(p=>p.data);
+  state.teams = Array.isArray(s.teams.data) ? s.teams.data : [];
+  applySharedSettings(s.settings.data);
+  state.settings.userName = me.name; /* signature = identité SSO */
+  normalizeState(state);
+  revs.plat = {}; shadow.plat = {};
+  s.platforms.forEach(p=>{ revs.plat[String(p.data && p.data.id)] = p.rev; });
+  state.platforms.forEach(p=>{ shadow.plat[p.id] = JSON.stringify(p); });
+  revs.teams = s.teams.rev;       shadow.teams = JSON.stringify(state.teams);
+  revs.settings = s.settings.rev; shadow.settings = sharedSettingsJson();
+}
+
+/* File d'écriture : les modifications partent dans l'ordre, coalescées par cible */
+const pushQ = {chain: Promise.resolve()};
+let retryTimer = 0;
+
+function queuePush(fn){
+  pushQ.chain = pushQ.chain.then(fn).catch(handlePushError);
+}
+function handlePushError(e){
+  toast('Enregistrement serveur : '+e.message, 'crit');
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(()=>pushChanges(), 4000);
+}
+
+function pushChanges(){
+  if(!canWrite()) return;
+  Object.keys(shadow.plat).forEach(id=>{
+    if(!state.platforms.some(p=>p.id===id)){
+      delete shadow.plat[id]; delete revs.plat[id];
+      queuePush(()=>api('/api/platforms/'+encodeURIComponent(id), {method:'DELETE'}).catch(e=>{
+        if(e.status!==404) throw e;
+      }));
+    }
+  });
+  state.platforms.forEach(p=>{
+    const js = JSON.stringify(p);
+    if(!(p.id in shadow.plat)){
+      shadow.plat[p.id] = js; revs.plat[p.id] = 0;
+      queuePush(()=>createPlatform(p.id));
+    } else if(js !== shadow.plat[p.id]){
+      shadow.plat[p.id] = js;
+      queuePush(()=>putPlatform(p.id));
+    }
+  });
+  const tj = JSON.stringify(state.teams);
+  if(tj !== shadow.teams){ shadow.teams = tj; queuePush(()=>putDoc('teams')); }
+  if(isAdmin()){
+    const sj = sharedSettingsJson();
+    if(sj !== shadow.settings){ shadow.settings = sj; queuePush(()=>putDoc('settings')); }
+  }
+}
+
+async function createPlatform(id){
+  const p = state.platforms.find(x=>x.id===id);
+  if(!p) return;
+  try{
+    const r = await api('/api/platforms', {method:'POST', body:{data:p}});
+    revs.plat[id] = r.rev; shadow.plat[id] = JSON.stringify(p);
+  }catch(e){
+    if(e.status===409){ return putPlatform(id); } /* id déjà présent : on écrase via PUT */
+    shadow.plat[id] = '__dirty__';
+    throw e;
+  }
+}
+
+async function putPlatform(id){
+  const p = state.platforms.find(x=>x.id===id);
+  if(!p) return;
+  try{
+    const r = await api('/api/platforms/'+encodeURIComponent(id), {method:'PUT', body:{rev:revs.plat[id]||0, data:p}});
+    revs.plat[id] = r.rev; shadow.plat[id] = JSON.stringify(p);
+  }catch(e){
+    if(e.status===409 && e.body && e.body.current){
+      const cur = e.body.current;
+      const i = state.platforms.findIndex(x=>x.id===id);
+      if(i>=0){ state.platforms[i] = cur.data; }
+      normalizeState(state);
+      revs.plat[id] = cur.rev;
+      shadow.plat[id] = JSON.stringify(state.platforms.find(x=>x.id===id)||{});
+      render();
+      toast('Conflit : « '+((cur.data&&cur.data.name)||id)+' » vient d’être modifiée par '+(cur.updatedBy||'un autre utilisateur')+' — version rechargée, rejouez votre modification.', 'crit');
+      return;
+    }
+    if(e.status===404){ return createPlatform(id); }
+    shadow.plat[id] = '__dirty__';
+    throw e;
+  }
+}
+
+async function putDoc(key){
+  const body = key==='teams'
+    ? {rev:revs.teams, data:state.teams}
+    : {rev:revs.settings, data:sharedSettings()};
+  try{
+    const r = await api('/api/'+key, {method:'PUT', body});
+    if(key==='teams'){ revs.teams = r.rev; shadow.teams = JSON.stringify(state.teams); }
+    else { revs.settings = r.rev; shadow.settings = sharedSettingsJson(); }
+  }catch(e){
+    if(e.status===409 && e.body && e.body.current){
+      if(key==='teams'){
+        state.teams = Array.isArray(e.body.current.data) ? e.body.current.data : [];
+        revs.teams = e.body.current.rev; shadow.teams = JSON.stringify(state.teams);
+      }else{
+        applySharedSettings(e.body.current.data);
+        revs.settings = e.body.current.rev; shadow.settings = sharedSettingsJson();
+      }
+      normalizeState(state); render();
+      toast('Réglages modifiés par '+(e.body.current.updatedBy||'un autre utilisateur')+' — version rechargée.', 'crit');
+      return;
+    }
+    if(key==='teams') shadow.teams = '__dirty__'; else shadow.settings = '__dirty__';
+    throw e;
+  }
+}
+
+/* Flux temps réel : les changements des autres utilisateurs arrivent tout seuls */
+let esWasDown = false;
+function startSSE(){
+  const es = new EventSource('/api/events');
+  es.onopen = ()=>{
+    if(esWasDown){
+      esWasDown = false;
+      loadServerState().then(()=>{ render(); toast('Connexion rétablie — données actualisées'); }).catch(()=>{});
+    }
+  };
+  es.onerror = ()=>{ esWasDown = true; };
+  es.onmessage = e=>{
+    let ev = null;
+    try{ ev = JSON.parse(e.data); }catch(err){ return; }
+    handleServerEvent(ev);
+  };
+}
+
+async function handleServerEvent(ev){
+  if(!ev || ev.instance === INSTANCE_ID) return;
+  try{
+    if(ev.type === 'platform'){
+      if(revs.plat[ev.id] === ev.rev) return;
+      const r = await api('/api/platforms/'+encodeURIComponent(ev.id));
+      const i = state.platforms.findIndex(p=>p.id===ev.id);
+      if(i>=0) state.platforms[i] = r.data; else state.platforms.push(r.data);
+      normalizeState(state);
+      revs.plat[ev.id] = r.rev;
+      shadow.plat[ev.id] = JSON.stringify(state.platforms.find(p=>p.id===ev.id)||{});
+      render();
+    }else if(ev.type === 'platform_delete'){
+      if(!(ev.id in shadow.plat)) return;
+      state.platforms = state.platforms.filter(p=>p.id!==ev.id);
+      delete revs.plat[ev.id]; delete shadow.plat[ev.id];
+      render();
+      toast('Fiche supprimée par '+(ev.by||'un autre utilisateur'));
+    }else if(ev.type === 'teams' || ev.type === 'settings' || ev.type === 'reload'){
+      await loadServerState();
+      render();
+    }
+  }catch(e){ /* l'événement suivant ou la reconnexion rattrapera */ }
 }
 function loadState(){
   try{
@@ -1021,11 +1237,12 @@ const relayBase = () => (state.integrations.relayUrl||'').trim().replace(/\/+$/,
 const siteBase  = () => (state.integrations.siteUrl||'').trim().replace(/\/+$/,'');
 
 async function atlFetch(pathAndQuery){
-  const url = relayBase() + '/atlassian' + pathAndQuery;
+  /* Mode serveur : le backend intègre le relais (même origine, authentification SSO) */
+  const url = (serverMode ? '' : relayBase()) + '/atlassian' + pathAndQuery;
   const ctrl = new AbortController();
   const timer = setTimeout(()=>ctrl.abort(), 15000);
   const headers = {'Accept':'application/json'};
-  if(state.integrations.relayToken) headers['X-Relay-Token'] = state.integrations.relayToken;
+  if(!serverMode && state.integrations.relayToken) headers['X-Relay-Token'] = state.integrations.relayToken;
   let res;
   try{
     res = await fetch(url, {signal:ctrl.signal, headers});
@@ -1267,14 +1484,14 @@ function seedBanner(){
 }
 
 function storageBanner(){
-  if(storageOk) return '';
+  if(serverMode || storageOk) return '';
   return '<div class="banner" style="background:var(--warn-bg); color:var(--warn); border-color:var(--warn-bg)">'+
     '<span><strong>Stockage local indisponible.</strong> Les données vivent en mémoire : exportez le JSON avant de fermer la page.</span>'+
   '</div>';
 }
 
 function exportReminder(){
-  if(state.seeded || !state.platforms.length) return '';
+  if(serverMode || state.seeded || !state.platforms.length) return '';
   const last = state.lastExportAt ? Date.parse(state.lastExportAt) : 0;
   const days = last ? Math.floor((Date.now()-last)/86400000) : null;
   if(days !== null && days < 7) return '';
@@ -1296,7 +1513,7 @@ function vDashboard(){
 
   let html = '<div class="topbar"><div><h1>Tableau de bord</h1>'+
     '<p class="sub">Direction Infrastructures &amp; Production · '+ps.length+' plateforme'+(ps.length>1?'s':'')+' suivie'+(ps.length>1?'s':'')+'</p></div>'+
-    '<div class="topbar-actions"><button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button></div></div>';
+    '<div class="topbar-actions">'+(canWrite()?'<button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button>':'')+'</div></div>';
   html += storageBanner() + seedBanner() + exportReminder();
 
   if(!ps.length) return html + emptyState();
@@ -1388,6 +1605,10 @@ function tile(label, n, ctx, cls){
 }
 
 function emptyState(){
+  if(!canWrite()){
+    return '<div class="card empty"><h2>Aucune plateforme suivie</h2>'+
+      '<p>Le référentiel est vide pour l’instant. Votre rôle est en lecture seule : un contributeur créera les premières fiches.</p></div>';
+  }
   return '<div class="card empty"><h2>Aucune plateforme suivie</h2>'+
     '<p>Créez votre première fiche de mise en exploitation, ou chargez le jeu de démonstration pour découvrir l’outil.</p>'+
     '<button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button>'+
@@ -1429,7 +1650,7 @@ function vList(){
   const ps = filteredPlatforms();
   let html = '<div class="topbar"><div><h1>Plateformes</h1>'+
     '<p class="sub">'+ps.length+' résultat'+(ps.length>1?'s':'')+' sur '+state.platforms.length+'</p></div>'+
-    '<div class="topbar-actions"><button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button></div></div>';
+    '<div class="topbar-actions">'+(canWrite()?'<button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button>':'')+'</div></div>';
   html += storageBanner() + seedBanner();
 
   html += '<div class="filters">'+
@@ -1475,7 +1696,7 @@ function vList(){
 function vKanban(){
   let html = '<div class="topbar"><div><h1>Pipeline</h1>'+
     '<p class="sub">Glissez une carte pour changer d’étape</p></div>'+
-    '<div class="topbar-actions"><button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button></div></div>';
+    '<div class="topbar-actions">'+(canWrite()?'<button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button>':'')+'</div></div>';
   html += storageBanner() + seedBanner();
   if(!state.platforms.length) return html + emptyState();
 
@@ -1757,7 +1978,7 @@ function dmexSearchModal(p){
 function vTeams(){
   let html = '<div class="topbar"><div><h1>Équipes</h1>'+
     '<p class="sub">Responsables des chantiers de la checklist</p></div>'+
-    '<div class="topbar-actions"><button class="btn btn-primary" data-action="new-team">'+icon('plus')+'Nouvelle équipe</button></div></div>';
+    '<div class="topbar-actions">'+(canWrite()?'<button class="btn btn-primary" data-action="new-team">'+icon('plus')+'Nouvelle équipe</button>':'')+'</div></div>';
   html += storageBanner() + seedBanner();
 
   const active = state.platforms.filter(p=>p.stage!=='run');
@@ -1780,45 +2001,74 @@ function vSettings(){
     '<p class="sub">Données, seuils et sauvegarde</p></div></div>';
   html += storageBanner();
 
-  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Identité</h2>'+
-    '<div class="set-row"><label for="set-name">Votre nom (apposé au journal et aux décisions Go/No-Go)</label>'+
-    '<input id="set-name" data-change="user-name" value="'+esc(state.settings.userName)+'" placeholder="Prénom Nom" style="min-width:220px"></div></div>';
+  if(serverMode){
+    html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Identité</h2>'+
+      '<p style="margin-bottom:4px">Connecté : <strong>'+esc(me.name)+'</strong> <span class="muted mono tiny">'+esc(me.email)+'</span> '+chip(me.role,'stage')+'</p>'+
+      '<p class="tiny muted">Identité fournie par le SSO d’entreprise — vos notes et décisions sont signées automatiquement, et chaque modification est tracée côté serveur.</p></div>';
+  }else{
+    html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Identité</h2>'+
+      '<div class="set-row"><label for="set-name">Votre nom (apposé au journal et aux décisions Go/No-Go)</label>'+
+      '<input id="set-name" data-change="user-name" value="'+esc(state.settings.userName)+'" placeholder="Prénom Nom" style="min-width:220px"></div></div>';
+  }
 
   html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Seuil de préparation</h2>'+
-    '<div class="set-row"><label for="set-th">Score minimal pour déclarer une plateforme « prête »</label>'+
-    '<input id="set-th" type="number" min="50" max="100" step="5" value="'+state.settings.readyThreshold+'" data-change="threshold" style="width:90px" class="mono"> <span class="muted">%</span></div></div>';
+    '<div class="set-row"><label for="set-th">Score minimal pour déclarer une plateforme « prête »'+
+    (serverMode?' <span class="muted">(réglage commun'+(isAdmin()?'':' — administrateurs')+')</span>':'')+'</label>'+
+    '<input id="set-th" type="number" min="50" max="100" step="5" value="'+state.settings.readyThreshold+'" data-change="threshold" style="width:90px" class="mono"'+(isAdmin()?'':' disabled')+'> <span class="muted">%</span></div></div>';
 
   html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Exporter / importer</h2>'+
-    '<p class="tiny muted" style="margin-bottom:10px">Les données vivent dans ce navigateur ('+(storageOk?'stockage local actif':'stockage local indisponible — session en mémoire')+'). Exportez le JSON pour sauvegarder ou partager, importez-le pour reprendre un état.</p>'+
+    '<p class="tiny muted" style="margin-bottom:10px">'+
+    (serverMode
+      ? 'Les données vivent dans le référentiel partagé du serveur. L’export JSON sert de sauvegarde externe et d’échange ; l’import remplace tout le référentiel'+(isAdmin()?'':' (réservé aux administrateurs)')+'.'
+      : 'Les données vivent dans ce navigateur ('+(storageOk?'stockage local actif':'stockage local indisponible — session en mémoire')+'). Exportez le JSON pour sauvegarder ou partager, importez-le pour reprendre un état.')+
+    '</p>'+
     '<div class="set-row">'+
       '<button class="btn" data-action="export-download">'+icon('down')+'Télécharger le JSON</button>'+
       '<button class="btn" data-action="export-copy">'+icon('copy')+'Copier le JSON</button>'+
-      '<label class="btn" for="import-file" style="cursor:pointer">'+icon('note')+'Charger un fichier…<input id="import-file" type="file" accept="application/json,.json" class="sr-only"></label>'+
+      (!serverMode || isAdmin() ? '<label class="btn" for="import-file" style="cursor:pointer">'+icon('note')+'Charger un fichier…<input id="import-file" type="file" accept="application/json,.json" class="sr-only"></label>' : '')+
     '</div>'+
-    '<div class="set-row" style="align-items:flex-start"><textarea id="io-area" data-draft="io" class="io" placeholder="Collez ici un export JSON puis cliquez sur Importer."></textarea></div>'+
-    '<div class="set-row"><button class="btn btn-primary" data-action="import-apply">Importer ces données</button></div></div>';
+    (!serverMode || isAdmin()
+      ? '<div class="set-row" style="align-items:flex-start"><textarea id="io-area" data-draft="io" class="io" placeholder="Collez ici un export JSON puis cliquez sur Importer."></textarea></div>'+
+        '<div class="set-row"><button class="btn btn-primary" data-action="import-apply">Importer ces données</button></div>'
+      : '')+
+    '</div>';
 
-  const baks = listBackups();
-  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Sauvegardes locales</h2>'+
-    '<p class="tiny muted" style="margin-bottom:8px; max-width:80ch">Cinq instantanés rotatifs conservés dans ce navigateur : un automatique par jour de modification, plus un avant chaque import, effacement ou rechargement de démo. Ce n’est pas une sauvegarde externe — exportez régulièrement. Occupation locale : '+Math.round(lsUsage()/1024)+' Ko.</p>'+
-    (baks.length ? baks.map(b=>'<div class="set-row"><label class="mono tiny" style="min-width:340px">'+esc(fmtTs(b.at))+' · '+esc(b.reason)+' · '+b.count+' plateforme'+(b.count>1?'s':'')+'</label>'+
-      '<button class="btn btn-s" data-action="restore-backup" data-slot="'+b.slot+'">Restaurer</button></div>').join('')
-      : '<p class="tiny muted">Aucune sauvegarde pour l’instant.</p>')+
-    '<div class="set-row" style="margin-top:4px"><button class="btn btn-s" data-action="make-backup">Créer une sauvegarde maintenant</button></div></div>';
+  if(serverMode){
+    html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Sauvegardes serveur</h2>'+
+      '<p class="tiny muted" style="margin-bottom:8px; max-width:80ch">Le serveur crée une sauvegarde compressée de la base chaque jour (et avant chaque import), avec rétention automatique — voir EXPLOITATION.md. L’export JSON ci-dessus reste la sauvegarde externe recommandée.</p>'+
+      (isAdmin() ? '<div class="set-row"><button class="btn btn-s" data-action="server-backup">Créer une sauvegarde serveur maintenant</button></div>' : '')+
+      '</div>';
+  }else{
+    const baks = listBackups();
+    html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Sauvegardes locales</h2>'+
+      '<p class="tiny muted" style="margin-bottom:8px; max-width:80ch">Cinq instantanés rotatifs conservés dans ce navigateur : un automatique par jour de modification, plus un avant chaque import, effacement ou rechargement de démo. Ce n’est pas une sauvegarde externe — exportez régulièrement. Occupation locale : '+Math.round(lsUsage()/1024)+' Ko.</p>'+
+      (baks.length ? baks.map(b=>'<div class="set-row"><label class="mono tiny" style="min-width:340px">'+esc(fmtTs(b.at))+' · '+esc(b.reason)+' · '+b.count+' plateforme'+(b.count>1?'s':'')+'</label>'+
+        '<button class="btn btn-s" data-action="restore-backup" data-slot="'+b.slot+'">Restaurer</button></div>').join('')
+        : '<p class="tiny muted">Aucune sauvegarde pour l’instant.</p>')+
+      '<div class="set-row" style="margin-top:4px"><button class="btn btn-s" data-action="make-backup">Créer une sauvegarde maintenant</button></div></div>';
+  }
 
   const it = state.integrations;
-  const fileHint = (location.protocol==='file:' && !it.relayUrl)
+  const fileHint = (!serverMode && location.protocol==='file:' && !it.relayUrl)
     ? '<p class="tiny" style="color:var(--warn); margin-top:8px">Page ouverte en fichier local : lancez le relais puis ouvrez l’application via son URL (http://…:8765/), ou renseignez ci-dessus l’URL du relais (démarré avec --open-cors).</p>' : '';
+  const admDis = isAdmin() ? '' : ' disabled';
+  const admNote = serverMode ? ' <span class="muted">(réglage commun'+(isAdmin()?'':' — administrateurs')+')</span>' : '';
   html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Intégration Atlassian (Jira &amp; Confluence Cloud)</h2>'+
-    '<p class="tiny muted" style="margin-bottom:10px; max-width:80ch">Atlassian Cloud bloque les appels directs depuis une page web (CORS) : les requêtes passent par le relais interne en lecture seule <span class="mono">relay.py</span> (voir README), qui garde le jeton API côté serveur — aucun secret n’est stocké dans le navigateur.</p>'+
-    '<div class="set-row"><label for="int-relay">URL du relais (vide = même origine que cette page)</label>'+
-    '<input id="int-relay" data-change="int-relay" value="'+esc(it.relayUrl)+'" placeholder="http://relais-interne:8765" style="min-width:280px" class="mono"></div>'+
-    '<div class="set-row"><label for="int-site">URL du site Atlassian (pour les liens vers les tickets)</label>'+
-    '<input id="int-site" data-change="int-site" value="'+esc(it.siteUrl)+'" placeholder="https://mon-entreprise.atlassian.net" style="min-width:280px" class="mono"></div>'+
-    '<div class="set-row"><label for="int-label">Label Confluence des pages DMEX</label>'+
-    '<input id="int-label" data-change="int-label" value="'+esc(it.dmexLabel||'asset-dip')+'" placeholder="asset-dip" style="min-width:160px" class="mono"></div>'+
-    '<div class="set-row"><label for="int-token">Jeton d’accès au relais (si RELAY_ACCESS_TOKEN y est configuré)</label>'+
-    '<input id="int-token" type="password" data-change="int-token" value="'+esc(it.relayToken)+'" placeholder="optionnel" style="min-width:200px" class="mono" autocomplete="off"></div>'+
+    '<p class="tiny muted" style="margin-bottom:10px; max-width:80ch">'+
+    (serverMode
+      ? 'Les requêtes Atlassian passent par le serveur (relais intégré en lecture seule, jeton API côté serveur, accès authentifié par le SSO).'
+      : 'Atlassian Cloud bloque les appels directs depuis une page web (CORS) : les requêtes passent par le relais interne en lecture seule <span class="mono">relay.py</span> (voir README), qui garde le jeton API côté serveur — aucun secret n’est stocké dans le navigateur.')+
+    '</p>'+
+    (serverMode ? '' :
+      '<div class="set-row"><label for="int-relay">URL du relais (vide = même origine que cette page)</label>'+
+      '<input id="int-relay" data-change="int-relay" value="'+esc(it.relayUrl)+'" placeholder="http://relais-interne:8765" style="min-width:280px" class="mono"></div>')+
+    '<div class="set-row"><label for="int-site">URL du site Atlassian (pour les liens vers les tickets)'+admNote+'</label>'+
+    '<input id="int-site" data-change="int-site" value="'+esc(it.siteUrl)+'" placeholder="https://mon-entreprise.atlassian.net" style="min-width:280px" class="mono"'+admDis+'></div>'+
+    '<div class="set-row"><label for="int-label">Label Confluence des pages DMEX'+admNote+'</label>'+
+    '<input id="int-label" data-change="int-label" value="'+esc(it.dmexLabel||'asset-dip')+'" placeholder="asset-dip" style="min-width:160px" class="mono"'+admDis+'></div>'+
+    (serverMode ? '' :
+      '<div class="set-row"><label for="int-token">Jeton d’accès au relais (si RELAY_ACCESS_TOKEN y est configuré)</label>'+
+      '<input id="int-token" type="password" data-change="int-token" value="'+esc(it.relayToken)+'" placeholder="optionnel" style="min-width:200px" class="mono" autocomplete="off"></div>')+
     '<div class="set-row">'+
       '<button class="btn" data-action="test-atl" data-kind="jira">Tester Jira</button>'+
       '<button class="btn" data-action="test-atl" data-kind="confluence">Tester Confluence</button>'+
@@ -1829,14 +2079,20 @@ function vSettings(){
     fileHint+
   '</div>';
 
-  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Réinitialisation</h2>'+
-    '<div class="set-row"><label>Recharger le jeu de démonstration (remplace tout)</label>'+
-    '<button class="btn" data-action="reset-demo">Recharger la démo</button></div>'+
-    '<div class="set-row"><label>Effacer toutes les données</label>'+
-    '<button class="btn btn-danger" data-action="wipe-all">'+icon('trash')+'Tout effacer</button></div></div>';
+  if(!serverMode || isAdmin()){
+    html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Réinitialisation'+(serverMode?' (référentiel partagé)':'')+'</h2>'+
+      '<div class="set-row"><label>Recharger le jeu de démonstration (remplace tout)</label>'+
+      '<button class="btn" data-action="reset-demo">Recharger la démo</button></div>'+
+      '<div class="set-row"><label>Effacer toutes les données</label>'+
+      '<button class="btn btn-danger" data-action="wipe-all">'+icon('trash')+'Tout effacer</button></div></div>';
+  }
 
   html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">À propos</h2>'+
-    '<p class="tiny muted" style="max-width:70ch">Passerelle <span class="mono">v'+APP_VERSION+'</span> — application autonome : un seul fichier HTML, aucune dépendance, données stockées localement dans le navigateur. Pour un usage partagé entre équipes, utilisez l’export JSON comme point d’échange — ou branchez un backend (v2) pour un référentiel commun.</p></div>';
+    '<p class="tiny muted" style="max-width:74ch">Passerelle <span class="mono">v'+APP_VERSION+'</span> — '+
+    (serverMode
+      ? 'mode <strong>référentiel partagé</strong> : les données vivent sur le serveur (SQLite sauvegardée), l’identité vient du SSO, les modifications des autres utilisateurs arrivent en temps réel.'
+      : 'mode <strong>local</strong> : un seul fichier HTML, aucune dépendance, données stockées dans ce navigateur. Pour un référentiel commun à toute la direction, déployez le serveur v2 (voir EXPLOITATION.md).')+
+    '</p></div>';
   return html;
 }
 
@@ -1866,7 +2122,10 @@ function render(){
   const r = route();
   const activeHash = {'dashboard':'#/tableau-de-bord','list':'#/plateformes','kanban':'#/pipeline','teams':'#/equipes','settings':'#/parametres','detail':'#/plateformes'}[r.view];
   $('#nav').innerHTML = NAV.map(n=>'<a class="nav-a'+(n.hash===activeHash?' active':'')+'" href="'+n.hash+'">'+icon(n.ic)+esc(n.label)+'</a>').join('');
-  $('#side-foot').innerHTML = state.platforms.length+' plateforme'+(state.platforms.length>1?'s':'')+' · '+state.platforms.filter(p=>p.stage!=='run').length+' active'+(state.platforms.filter(p=>p.stage!=='run').length>1?'s':'')+'<br><span class="mono">v'+APP_VERSION+'</span>';
+  $('#side-foot').innerHTML =
+    (serverMode && me ? '<strong>'+esc(me.name)+'</strong> · '+esc(me.role)+'<br>' : '')+
+    state.platforms.length+' plateforme'+(state.platforms.length>1?'s':'')+' · '+state.platforms.filter(p=>p.stage!=='run').length+' active'+(state.platforms.filter(p=>p.stage!=='run').length>1?'s':'')+
+    '<br><span class="mono">v'+APP_VERSION+(serverMode?' · partagé':'')+'</span>';
 
   const sameRoute = lastHash === location.hash;
   const y = window.scrollY;
@@ -2055,8 +2314,17 @@ function versionGt(a, b){
 }
 
 async function downloadExport(){
-  const data = exportJSON();
+  let data;
   const filename = 'passerelle-mee-'+todayISO()+'.json';
+  if(serverMode){
+    try{
+      const r = await fetch('/api/export', {headers:{Accept:'application/json'}});
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      data = await r.text();
+    }catch(e){ toast('Export serveur impossible : '+e.message,'crit'); return; }
+  }else{
+    data = exportJSON();
+  }
   /* Hébergée en Artifact claude.ai, la page passe par la capacité « downloads » */
   const dl = (window.claude && typeof window.claude.use==='function')
     ? await window.claude.use('downloads').catch(()=>null) : null;
@@ -2080,8 +2348,16 @@ async function downloadExport(){
   }catch(e){ toast('Téléchargement impossible ici — utilisez « Copier le JSON »','crit'); }
 }
 
-function copyExport(){
-  const txt = exportJSON();
+async function copyExport(){
+  let txt;
+  if(serverMode){
+    try{
+      const r = await fetch('/api/export', {headers:{Accept:'application/json'}});
+      txt = await r.text();
+    }catch(e){ toast('Export serveur impossible : '+e.message,'crit'); return; }
+  }else{
+    txt = exportJSON();
+  }
   const done = ()=>{ markExported(); toast('JSON copié dans le presse-papier','good'); };
   const fail = ()=>{ const ta=$('#io-area'); if(ta){ta.value=txt; ta.select();} toast('Copie automatique refusée : le JSON est dans la zone de texte','crit'); };
   if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fail);
@@ -2092,6 +2368,14 @@ function importData(txt){
   let s;
   try{ s = JSON.parse(txt); }catch(e){ toast('JSON invalide','crit'); return; }
   if(!s || typeof s!=='object' || !Array.isArray(s.platforms) || !Array.isArray(s.teams)){ toast('Format inattendu : export Passerelle requis','crit'); return; }
+  if(serverMode){
+    if(!isAdmin()){ toast('Import : réservé aux administrateurs.','crit'); return; }
+    if(!confirm('Importer ces données dans le référentiel PARTAGÉ ? Tout le contenu actuel sera remplacé (sauvegarde serveur prise avant).')) return;
+    api('/api/import', {method:'POST', body:s})
+      .then(r=>loadServerState().then(()=>{ render(); toast('Données importées : '+r.platforms+' plateforme'+(r.platforms>1?'s':''),'good'); }))
+      .catch(e=>toast('Import impossible : '+e.message,'crit'));
+    return;
+  }
   const newer = s.appVersion && versionGt(s.appVersion, APP_VERSION);
   makeBackup('avant import');
   try{ state = normalizeState(s); }
@@ -2107,6 +2391,10 @@ document.addEventListener('click', e=>{
   const actEl = e.target.closest('[data-action]');
   if(actEl){
     const a = actEl.dataset.action;
+    if(MUTATING_ACTIONS.has(a) && !canWrite()){
+      toast('Lecture seule : votre rôle ne permet pas de modifier.','crit');
+      return;
+    }
     const pid = actEl.dataset.id;
     const p = pid ? state.platforms.find(x=>x.id===pid) : null;
 
@@ -2214,8 +2502,29 @@ document.addEventListener('click', e=>{
       return;
     }
     if(a==='hide-seed-banner'){ state.seedBannerHidden = true; saveState(); render(); return; }
-    if(a==='load-demo'){ state = buildSeed(); saveState(); render(); toast('Démonstration chargée','good'); return; }
+    if(a==='load-demo'){
+      if(serverMode){
+        const seed = buildSeed();
+        state.platforms = seed.platforms;
+        state.teams = seed.teams;
+        normalizeState(state);
+        saveState(); render(); toast('Démonstration chargée dans le référentiel partagé','good');
+      }else{
+        state = buildSeed(); saveState(); render(); toast('Démonstration chargée','good');
+      }
+      return;
+    }
     if(a==='reset-demo'){
+      if(serverMode){
+        if(!isAdmin()){ toast('Réservé aux administrateurs.','crit'); return; }
+        if(!confirm('Remplacer TOUT le référentiel partagé par le jeu de démonstration ? (sauvegarde serveur prise avant)')) return;
+        const seed = buildSeed();
+        api('/api/import', {method:'POST', body:{version:1, platforms:seed.platforms, teams:seed.teams,
+            settings:seed.settings, integrations:seed.integrations}})
+          .then(()=>loadServerState()).then(()=>{ render(); toast('Démonstration rechargée','good'); })
+          .catch(e=>toast('Échec : '+e.message,'crit'));
+        return;
+      }
       if(confirm('Remplacer toutes les données par le jeu de démonstration ? (une sauvegarde locale est prise avant)')){
         makeBackup('avant rechargement de la démo');
         state = buildSeed(); saveState(); render(); toast('Démonstration rechargée','good');
@@ -2223,12 +2532,29 @@ document.addEventListener('click', e=>{
       return;
     }
     if(a==='wipe-all'){
+      if(serverMode){
+        if(!isAdmin()){ toast('Réservé aux administrateurs.','crit'); return; }
+        if(!confirm('Effacer TOUT le référentiel partagé ? Une sauvegarde serveur est prise avant.')) return;
+        api('/api/import', {method:'POST', body:{version:1, platforms:[], teams:seedTeams(),
+            settings:{readyThreshold:state.settings.readyThreshold},
+            integrations:{dmexLabel:state.integrations.dmexLabel, siteUrl:state.integrations.siteUrl}}})
+          .then(()=>loadServerState()).then(()=>{ location.hash='#/tableau-de-bord'; render(); toast('Référentiel effacé'); })
+          .catch(e=>toast('Échec : '+e.message,'crit'));
+        return;
+      }
       if(confirm('Effacer toutes les données ? Une sauvegarde locale est prise avant (Paramètres → Sauvegardes), mais pensez aussi à exporter.')){
         makeBackup('avant effacement');
         state = blankState();
         state.teams = seedTeams();
         saveState(); location.hash='#/tableau-de-bord'; render(); toast('Données effacées');
       }
+      return;
+    }
+    if(a==='server-backup'){
+      if(!isAdmin()){ toast('Réservé aux administrateurs.','crit'); return; }
+      api('/api/backup', {method:'POST'})
+        .then(()=>toast('Sauvegarde serveur créée','good'))
+        .catch(e=>toast('Échec : '+e.message,'crit'));
       return;
     }
     if(a==='restore-backup'){
@@ -2256,6 +2582,10 @@ document.addEventListener('submit', e=>{
   if(!f) return;
   e.preventDefault();
   const kind = f.dataset.submit;
+  if(kind!=='dmex-search' && !canWrite()){
+    toast('Lecture seule : votre rôle ne permet pas de modifier.','crit');
+    return;
+  }
   const fd = new FormData(f);
   const val = n => String(fd.get(n)||'').trim();
 
@@ -2333,6 +2663,10 @@ document.addEventListener('change', e=>{
   const el = e.target.closest('[data-change]');
   if(!el) return;
   const k = el.dataset.change;
+  if(k!=='filter' && k!=='sort'){
+    if(!canWrite()){ toast('Lecture seule : votre rôle ne permet pas de modifier.','crit'); render(); return; }
+    if(serverMode && ADMIN_CHANGES.has(k) && !isAdmin()){ toast('Réglage commun : réservé aux administrateurs.','crit'); render(); return; }
+  }
   const p = el.dataset.id ? state.platforms.find(x=>x.id===el.dataset.id) : null;
 
   if(k==='filter'){ ui.filters[el.dataset.k] = el.value; render(); return; }
@@ -2399,8 +2733,9 @@ document.addEventListener('keydown', e=>{
 
 window.addEventListener('hashchange', render);
 
-/* Multi-onglets : si un autre onglet écrit l'état, on le recharge au lieu de l'écraser */
+/* Multi-onglets (mode local) : si un autre onglet écrit l'état, on le recharge au lieu de l'écraser */
 window.addEventListener('storage', e=>{
+  if(serverMode) return; /* en mode serveur, le SSE fait ce travail */
   if(e.key !== LS_KEY || suppressStorageEvent || e.newValue == null) return;
   const fresh = loadState();
   if(!fresh) return;
@@ -2411,15 +2746,33 @@ window.addEventListener('storage', e=>{
 
 /* ---------- Démarrage ---------- */
 
-(function boot(){
+(async function boot(){
   try{ localStorage.setItem('__pmee_test','1'); localStorage.removeItem('__pmee_test'); }
   catch(e){ storageOk = false; }
-  state = loadState();
-  if(!state){
-    state = buildSeed();
-    saveState();
+  /* Sonde le backend : servie par server.py, la page bascule en mode partagé */
+  try{
+    const ctrl = new AbortController();
+    const t = setTimeout(()=>ctrl.abort(), 2500);
+    const r = await fetch('/api/me', {headers:{Accept:'application/json'}, signal:ctrl.signal});
+    clearTimeout(t);
+    if(r.ok){
+      const m = await r.json();
+      if(m && m.app==='passerelle' && m.email){ me = m; serverMode = true; }
+    }
+  }catch(e){}
+  if(serverMode){
+    state = blankState();
+    try{ await loadServerState(); }
+    catch(e){ toast('Chargement du référentiel impossible : '+e.message, 'crit'); }
+    startSSE();
+  }else{
+    state = loadState();
+    if(!state){
+      state = buildSeed();
+      saveState();
+    }
+    normalizeState(state);
   }
-  normalizeState(state);
   render();
 })();
 </script>

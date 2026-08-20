@@ -1,0 +1,42 @@
+# Passerelle v2 — déploiement type.
+# L'application fait confiance aux en-têtes d'identité : elle ne doit être
+# joignable QUE via le proxy SSO (oauth2-proxy ci-dessous, ou équivalent).
+services:
+  passerelle:
+    build: .
+    restart: unless-stopped
+    environment:
+      ADMIN_EMAILS: "chef@mon-entreprise.fr"
+      # WRITE_EMAILS: ""              # vide = tout utilisateur authentifié est contributeur
+      ATL_SITE: "https://mon-entreprise.atlassian.net"
+      ATL_EMAIL: "compte-service@mon-entreprise.fr"
+      ATL_TOKEN: "${ATL_TOKEN:?définir ATL_TOKEN dans .env}"
+      BACKUP_KEEP: "14"
+    volumes:
+      - passerelle-data:/data
+    # Ne PAS publier ce port directement : seul oauth2-proxy doit y accéder.
+    # ports: ["8080:8080"]           # uniquement pour un test local sans SSO (AUTH_MODE=none)
+
+  # SSO Entra ID via oauth2-proxy — à compléter avec votre inscription d'application.
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    restart: unless-stopped
+    command:
+      - --provider=oidc
+      - --oidc-issuer-url=https://login.microsoftonline.com/${TENANT_ID}/v2.0
+      - --client-id=${OIDC_CLIENT_ID}
+      - --client-secret=${OIDC_CLIENT_SECRET}
+      - --cookie-secret=${COOKIE_SECRET}
+      - --email-domain=*
+      - --http-address=0.0.0.0:4180
+      - --upstream=http://passerelle:8080
+      - --set-xauthrequest=true           # transmet X-Auth-Request-Email / -Preferred-Username
+      - --pass-access-token=false
+      - --skip-provider-button=true
+    ports:
+      - "4180:4180"   # à placer derrière le reverse proxy TLS d'entreprise
+    depends_on:
+      - passerelle
+
+volumes:
+  passerelle-data:
