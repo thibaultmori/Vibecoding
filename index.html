@@ -127,6 +127,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
   padding:7px 13px; font-weight:500; color:var(--ink);
 }
 .btn:hover{background:var(--surface2)}
+.btn:disabled{opacity:.55; cursor:default}
 .btn svg{width:15px;height:15px}
 .btn-primary{background:var(--accent); border-color:var(--accent); color:var(--on-accent); font-weight:600}
 .btn-primary:hover{background:var(--accent-strong); border-color:var(--accent-strong)}
@@ -350,6 +351,26 @@ table.plist{width:100%; border-collapse:collapse; font-size:13.5px; min-width:82
 .gng-decided{border:1px solid var(--line); border-radius:var(--r-s); padding:10px 12px; background:var(--surface2)}
 .gng-decided .d-date{font-family:var(--mono); font-size:11.5px; color:var(--ink3)}
 .gng-decided .d-com{font-size:12.5px; color:var(--ink2); margin-top:4px}
+
+/* ============ Intégration Jira / DMEX ============ */
+.int-bar{display:flex; gap:8px; align-items:center; padding:10px 18px 4px; flex-wrap:wrap}
+.int-bar label{font-size:11px; text-transform:uppercase; letter-spacing:.7px; color:var(--ink3); font-weight:600}
+.int-bar input{flex:1; min-width:200px; font-family:var(--mono); font-size:12px; padding:5px 8px; color:var(--ink2)}
+.jscroll{overflow-x:auto; padding:2px 18px 8px}
+table.jtable{width:100%; border-collapse:collapse; font-size:12.5px; min-width:540px}
+.jtable th{text-align:left; font-size:10.5px; text-transform:uppercase; letter-spacing:.7px; color:var(--ink3); font-weight:600; padding:8px 10px 6px; border-bottom:1px solid var(--line); white-space:nowrap}
+.jtable td{padding:7px 10px; border-bottom:1px dashed var(--line); vertical-align:top}
+.jtable tr:last-child td{border-bottom:none}
+.jkey{font-family:var(--mono); font-size:12px; white-space:nowrap}
+.int-error{margin:8px 18px 4px; padding:8px 12px; border-radius:var(--r-s); background:var(--crit-bg); color:var(--crit); font-size:12.5px}
+.int-hint{margin:8px 18px 4px; padding:8px 12px; border-radius:var(--r-s); background:var(--surface2); color:var(--ink2); font-size:12.5px}
+.int-foot{padding:8px 18px 12px; font-size:11.5px; color:var(--ink3); display:flex; gap:12px; flex-wrap:wrap; align-items:center}
+.dmex-row{display:flex; align-items:center; gap:10px; padding:9px 18px; border-top:1px solid var(--line)}
+.dmex-main{flex:1; min-width:0}
+.dmex-title{font-weight:600; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dmex-meta{font-size:12px; color:var(--ink3)}
+.test-line{font-size:12.5px; padding:2px 0; color:var(--ink2)}
+.test-line.ok{color:var(--good)} .test-line.ko{color:var(--crit)}
 
 /* ============ Équipes ============ */
 .team-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px}
@@ -588,7 +609,7 @@ let state = null;
 
 const ui = {
   q:'', filters:{stage:'',crit:'',status:'',team:''}, sort:'date',
-  catOpen:{}, comments:{}, refocus:null,
+  catOpen:{}, comments:{}, refocus:null, test:{},
 };
 let lastHash = null;
 
@@ -609,9 +630,25 @@ function blankState(){
   return {
     version:1, seeded:false, seedBannerHidden:false,
     settings:{readyThreshold:90},
+    integrations:{relayUrl:'', siteUrl:''},
     teams:[], platforms:[],
     createdAt:new Date().toISOString(),
   };
+}
+
+const BLANK_SYNC = () => ({at:'', jiraError:'', dmexError:'', partial:false, more:false, issues:[], pages:[]});
+
+function normalizeState(s){
+  s.settings = Object.assign({readyThreshold:90}, s.settings||{});
+  s.integrations = Object.assign({relayUrl:'', siteUrl:''}, s.integrations||{});
+  (s.platforms||[]).forEach(p=>{
+    p.checklist = p.checklist||[]; p.actions = p.actions||[]; p.journal = p.journal||[];
+    p.gonogo = p.gonogo||{decision:null,date:'',comment:''};
+    p.jiraJql = p.jiraJql||'';
+    p.dmexPages = p.dmexPages||[];
+    p.sync = Object.assign(BLANK_SYNC(), p.sync||{});
+  });
+  return s;
 }
 
 /* ---------- Modèle ---------- */
@@ -632,6 +669,7 @@ function newPlatform(fields){
     owner:'', sponsor:'', targetDate:'', goLiveDate:'', description:'',
     stage:'cadrage', checklist:newChecklist(), actions:[], journal:[],
     gonogo:{decision:null, date:'', comment:''},
+    jiraJql:'', dmexPages:[], sync:BLANK_SYNC(),
     createdAt:new Date().toISOString(),
   }, fields||{});
 }
@@ -716,6 +754,21 @@ function buildSeed(){
     {ts:'2026-08-12T09:30:00', text:'Passage en pré-production validé en comité d’architecture.'},
     {ts:'2026-07-28T14:10:00', text:'Recette technique terminée : 2 réserves mineures levées.'},
   ];
+  p.jiraJql = 'project = KAAS AND labels = mise-en-exploitation ORDER BY updated DESC';
+  p.dmexPages = [
+    {url:'https://exemple.atlassian.net/wiki/spaces/INFRA/pages/98304001', id:'98304001'},
+    {url:'https://exemple.atlassian.net/wiki/spaces/INFRA/pages/98304002', id:'98304002'},
+  ];
+  p.sync = Object.assign(BLANK_SYNC(), {at:'2026-08-18T17:32:00', issues:[
+    {key:'KAAS-138', summary:'Planifier et jouer le test de bascule PRA', type:'Task', status:'En cours', statusCat:'indeterminate', assignee:'Karim Benali', priority:'Highest', updated:'2026-08-18T09:12:00+02:00', url:'https://exemple.atlassian.net/browse/KAAS-138'},
+    {key:'KAAS-152', summary:'Compléter les consignes N1 — redémarrage des nœuds', type:'Task', status:'Terminé', statusCat:'done', assignee:'Julien Moreau', priority:'High', updated:'2026-08-14T16:40:00+02:00', url:'https://exemple.atlassian.net/browse/KAAS-152'},
+    {key:'KAAS-155', summary:'Créer les alertes Mimir sur la capacité etcd', type:'Story', status:'À faire', statusCat:'new', assignee:'Laura Da Silva', priority:'Medium', updated:'2026-08-12T11:05:00+02:00', url:'https://exemple.atlassian.net/browse/KAAS-155'},
+    {key:'KAAS-141', summary:'Ouvrir les flux inter-VLAN vers les registres', type:'Task', status:'Terminé', statusCat:'done', assignee:'Claire Fontaine', priority:'High', updated:'2026-08-08T10:22:00+02:00', url:'https://exemple.atlassian.net/browse/KAAS-141'},
+    {key:'KAAS-160', summary:'Rédiger le plan de capacité à 12 mois', type:'Story', status:'À faire', statusCat:'new', assignee:'', priority:'Medium', updated:'2026-08-05T15:00:00+02:00', url:'https://exemple.atlassian.net/browse/KAAS-160'},
+  ], pages:[
+    {id:'98304001', title:'DMEX — KaaS Kubernetes interne', space:'Infrastructures & Production', version:7, by:'Karim Benali', when:'2026-08-14T09:20:00.000Z', url:'https://exemple.atlassian.net/wiki/spaces/INFRA/pages/98304001'},
+    {id:'98304002', title:'Runbook — exploitation des clusters KaaS', space:'Infrastructures & Production', version:4, by:'Julien Moreau', when:'2026-07-30T14:05:00.000Z', url:'https://exemple.atlassian.net/wiki/spaces/INFRA/pages/98304002'},
+  ]});
   P.push(p);
 
   p = newPlatform({id:'p-datalake', name:'Datalake v2 — Trino / Iceberg', type:'Data', criticality:'C2',
@@ -729,6 +782,18 @@ function buildSeed(){
   p.journal = [
     {ts:'2026-08-05T11:00:00', text:'Retard signalé : dimensionnement des workers à revoir, la date cible du 10/08 ne sera pas tenue.'},
   ];
+  p.jiraJql = 'project = DLK AND sprint in openSprints() ORDER BY status';
+  p.dmexPages = [
+    {url:'https://exemple.atlassian.net/wiki/spaces/DATA/pages/87700003', id:'87700003'},
+  ];
+  p.sync = Object.assign(BLANK_SYNC(), {at:'2026-08-16T08:50:00', issues:[
+    {key:'DLK-310', summary:'Redimensionner les workers Trino (pics de requêtes)', type:'Task', status:'En cours', statusCat:'indeterminate', assignee:'Sophie Lemaire', priority:'Highest', updated:'2026-08-15T18:02:00+02:00', url:'https://exemple.atlassian.net/browse/DLK-310'},
+    {key:'DLK-305', summary:'Livrer la matrice de flux à l’équipe réseau', type:'Task', status:'À faire', statusCat:'new', assignee:'Claire Fontaine', priority:'High', updated:'2026-08-12T09:30:00+02:00', url:'https://exemple.atlassian.net/browse/DLK-305'},
+    {key:'DLK-296', summary:'Migration des tables Iceberg du périmètre pilote', type:'Story', status:'Terminé', statusCat:'done', assignee:'Sophie Lemaire', priority:'Medium', updated:'2026-08-04T14:11:00+02:00', url:'https://exemple.atlassian.net/browse/DLK-296'},
+    {key:'DLK-312', summary:'Politique de rétention des snapshots à valider', type:'Story', status:'À faire', statusCat:'new', assignee:'', priority:'Medium', updated:'2026-08-02T10:45:00+02:00', url:'https://exemple.atlassian.net/browse/DLK-312'},
+  ], pages:[
+    {id:'87700003', title:'DMEX — Datalake v2', space:'Data', version:3, by:'Sophie Lemaire', when:'2026-01-10T10:00:00.000Z', url:'https://exemple.atlassian.net/wiki/spaces/DATA/pages/87700003'},
+  ]});
   P.push(p);
 
   p = newPlatform({id:'p-apigw', name:'Passerelle d’API — Kong', type:'Middleware', criticality:'C1',
@@ -741,6 +806,18 @@ function buildSeed(){
     {ts:'2026-08-17T10:00:00', text:'Revue Go/No-Go planifiée le 26/08 avec la Direction du Digital.'},
     {ts:'2026-08-11T16:40:00', text:'Test de charge validé : 12 000 req/s en pointe, marge de 40 %.'},
   ];
+  p.jiraJql = 'project = APIGW AND fixVersion = "MEP 1.0" ORDER BY status';
+  p.dmexPages = [
+    {url:'https://exemple.atlassian.net/wiki/spaces/DIGI/pages/91200001', id:'91200001'},
+  ];
+  p.sync = Object.assign(BLANK_SYNC(), {at:'2026-08-17T10:05:00', issues:[
+    {key:'APIGW-214', summary:'Publier le rapport du test de charge (12k req/s)', type:'Task', status:'En cours', statusCat:'indeterminate', assignee:'Claire Fontaine', priority:'High', updated:'2026-08-17T09:20:00+02:00', url:'https://exemple.atlassian.net/browse/APIGW-214'},
+    {key:'APIGW-209', summary:'Certificats TLS et rotation automatique', type:'Task', status:'Terminé', statusCat:'done', assignee:'Mehdi Achour', priority:'High', updated:'2026-08-10T17:55:00+02:00', url:'https://exemple.atlassian.net/browse/APIGW-209'},
+    {key:'APIGW-207', summary:'Journalisation centralisée des accès partenaires', type:'Story', status:'Terminé', statusCat:'done', assignee:'Laura Da Silva', priority:'Medium', updated:'2026-08-07T11:32:00+02:00', url:'https://exemple.atlassian.net/browse/APIGW-207'},
+    {key:'APIGW-201', summary:'Configuration des quotas par partenaire', type:'Story', status:'Terminé', statusCat:'done', assignee:'Claire Fontaine', priority:'Medium', updated:'2026-08-01T15:14:00+02:00', url:'https://exemple.atlassian.net/browse/APIGW-201'},
+  ], pages:[
+    {id:'91200001', title:'DMEX — Passerelle d’API Kong', space:'Digital', version:12, by:'Claire Fontaine', when:'2026-08-15T08:45:00.000Z', url:'https://exemple.atlassian.net/wiki/spaces/DIGI/pages/91200001'},
+  ]});
   P.push(p);
 
   p = newPlatform({id:'p-supng', name:'Supervision NG — Grafana / Mimir', type:'Infrastructure', criticality:'C2',
@@ -787,6 +864,153 @@ function buildSeed(){
   return s;
 }
 
+/* ---------- Intégration Atlassian (Jira & Confluence Cloud, via relais) ---------- */
+
+const relayBase = () => (state.integrations.relayUrl||'').trim().replace(/\/+$/,'');
+const siteBase  = () => (state.integrations.siteUrl||'').trim().replace(/\/+$/,'');
+
+async function atlFetch(pathAndQuery){
+  const url = relayBase() + '/atlassian' + pathAndQuery;
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort(), 15000);
+  let res;
+  try{
+    res = await fetch(url, {signal:ctrl.signal, headers:{'Accept':'application/json'}});
+  }catch(e){
+    clearTimeout(timer);
+    const hint = (location.protocol==='file:' && !relayBase())
+      ? 'lancez le relais (python3 relay.py) et ouvrez l’application via http://…:8765/, ou renseignez l’URL du relais dans Paramètres.'
+      : 'relais éteint ou appels réseau bloqués ici (page hébergée en Artifact). Synchronisez depuis la version intranet — les données en cache restent affichées.';
+    throw new Error('Réseau : '+hint);
+  }
+  clearTimeout(timer);
+  if(!res.ok){
+    let body = null;
+    try{ body = await res.json(); }catch(e){}
+    const detail = body && ((body.errorMessages && body.errorMessages.join(' · ')) || body.message || body.error) || '';
+    if(res.status===401) throw new Error('Authentification refusée (401) : jeton du relais invalide ou expiré (les jetons Atlassian expirent au bout d’un an au plus). '+detail);
+    if(res.status===403) throw new Error('Accès refusé (403) : droits insuffisants ou chemin hors liste blanche du relais. '+detail);
+    if(res.status===404) throw new Error('Introuvable (404)'+(detail?' : '+detail:' — vérifiez l’identifiant ou l’URL.'));
+    if(res.status===429) throw new Error('Limite Atlassian atteinte (429) — réessayez dans '+(res.headers.get('Retry-After')||'quelques')+' s.');
+    if(res.status===400) throw new Error('Requête refusée (400)'+(detail?' : '+detail:' — vérifiez la JQL.'));
+    throw new Error('Erreur '+res.status+(detail?' : '+detail:''));
+  }
+  return res.json();
+}
+
+/* Jira renvoie des offsets sans deux-points (+0000) : normaliser pour Date.parse */
+const fixTZ = s => String(s||'').replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+
+const JIRA_CAT = {
+  new:          {label:'À faire',  cls:'na'},
+  indeterminate:{label:'En cours', cls:'info'},
+  done:         {label:'Terminé',  cls:'good'},
+};
+const jiraCat = k => JIRA_CAT[k] || {label:'—', cls:'na'};
+
+async function jiraSearch(jql){
+  const q = '/rest/api/3/search/jql?jql='+encodeURIComponent(jql)+
+    '&fields=summary,status,assignee,issuetype,priority,updated&maxResults=50';
+  const data = await atlFetch(q);
+  const issues = (data.issues||[]).map(is=>{
+    const f = is.fields||{};
+    return {
+      key: is.key,
+      summary: f.summary||'',
+      type: (f.issuetype && f.issuetype.name) || '',
+      status: (f.status && f.status.name) || '',
+      statusCat: (f.status && f.status.statusCategory && f.status.statusCategory.key) || 'new',
+      assignee: (f.assignee && f.assignee.displayName) || '',
+      priority: (f.priority && f.priority.name) || '',
+      updated: f.updated ? fixTZ(f.updated) : '',
+      url: siteBase() ? siteBase()+'/browse/'+is.key : '',
+    };
+  });
+  return {issues, more: !!data.nextPageToken};
+}
+
+const jiraMyself = () => atlFetch('/rest/api/3/myself');
+const confluenceCurrentUser = () => atlFetch('/wiki/rest/api/user/current');
+
+function parsePageId(input){
+  const s = String(input||'').trim();
+  if(!s) return {error:'Collez l’URL d’une page Confluence.'};
+  if(/^\d+$/.test(s)) return {id:s, url:''};
+  let m = s.match(/\/pages\/(?:edit-v2\/)?(\d+)/);
+  if(!m) m = s.match(/[?&]pageId=(\d+)/);
+  if(m) return {id:m[1], url:s};
+  if(/\/wiki\/x\//.test(s)) return {error:'Lien court « /wiki/x/… » non pris en charge : ouvrez la page et collez son URL complète.'};
+  return {error:'URL non reconnue : collez l’URL complète d’une page (…/wiki/spaces/…/pages/<id>/…).'};
+}
+
+const atlCache = {spaces:{}, users:{}};
+
+async function confluencePageMeta(pageIds){
+  const data = await atlFetch('/wiki/api/v2/pages?id='+pageIds.join(','));
+  const pages = data.results||[];
+  const spaceIds = [...new Set(pages.map(p=>String(p.spaceId)).filter(id=>id && id!=='undefined' && !(id in atlCache.spaces)))];
+  if(spaceIds.length){
+    try{
+      const sp = await atlFetch('/wiki/api/v2/spaces?ids='+spaceIds.join(','));
+      (sp.results||[]).forEach(s=>{ atlCache.spaces[String(s.id)] = s.name || s.key || ''; });
+    }catch(e){ /* dégradation : pas de nom d'espace */ }
+  }
+  const authorIds = [...new Set(pages.map(p=>p.version && p.version.authorId).filter(a=>a && !(a in atlCache.users)))];
+  await Promise.all(authorIds.map(async a=>{
+    try{
+      const u = await atlFetch('/wiki/rest/api/user?accountId='+encodeURIComponent(a));
+      atlCache.users[a] = u.displayName || '';
+    }catch(e){ atlCache.users[a] = ''; }
+  }));
+  return pages.map(pg=>({
+    id: String(pg.id),
+    title: pg.title || ('Page '+pg.id),
+    space: atlCache.spaces[String(pg.spaceId)] || '',
+    version: (pg.version && pg.version.number) || 0,
+    by: (pg.version && atlCache.users[pg.version.authorId]) || '',
+    when: (pg.version && pg.version.createdAt) || '',
+    url: '',
+  }));
+}
+
+const syncing = {};
+
+async function syncPlatform(p){
+  if(syncing[p.id]) return;
+  syncing[p.id] = true; render();
+  const res = Object.assign(BLANK_SYNC(), {
+    at:new Date().toISOString(),
+    issues:p.sync.issues, pages:p.sync.pages, more:p.sync.more,
+  });
+  await Promise.all([
+    (async()=>{
+      if(!p.jiraJql.trim()){ res.issues=[]; res.more=false; return; }
+      try{ const r = await jiraSearch(p.jiraJql.trim()); res.issues=r.issues; res.more=r.more; }
+      catch(e){ res.jiraError = e.message; }
+    })(),
+    (async()=>{
+      const ids = p.dmexPages.map(d=>d.id).filter(Boolean);
+      if(!ids.length){ res.pages=[]; return; }
+      try{
+        const metas = await confluencePageMeta(ids);
+        const byId = {}; metas.forEach(m=>{ byId[m.id]=m; });
+        res.pages = p.dmexPages.map(d=>{
+          const m = byId[String(d.id)];
+          return m ? Object.assign({}, m, {url:d.url||m.url})
+                   : {id:String(d.id), title:'Page '+d.id+' (introuvable ou accès refusé)', space:'', version:0, by:'', when:'', url:d.url, missing:true};
+        });
+      }catch(e){ res.dmexError = e.message; }
+    })(),
+  ]);
+  res.partial = !!(res.jiraError||res.dmexError) && !(res.jiraError&&res.dmexError);
+  p.sync = res;
+  delete syncing[p.id];
+  if(res.jiraError && res.dmexError){ logJ(p,'Synchronisation Jira & DMEX en échec.'); toast('Synchronisation en échec','crit'); }
+  else if(res.jiraError||res.dmexError){ logJ(p,'Synchronisation partielle : '+(res.jiraError?'Jira':'DMEX')+' en échec.'); toast('Synchronisation partielle','crit'); }
+  else { logJ(p,'Synchronisation Jira & DMEX : '+res.issues.length+' ticket(s), '+res.pages.length+' page(s) DMEX.'); toast('Synchronisation réussie','good'); }
+  saveState(); render();
+}
+
 /* ---------- Icônes ---------- */
 
 const ICONS = {
@@ -806,6 +1030,7 @@ const ICONS = {
   pen:'<path d="M4 20l4.2-1L20 7.2 16.8 4 5 15.8 4 20z"/>',
   note:'<path d="M5 4.5h14v11l-4 4H5v-15zM15 19.5v-4h4"/>',
   arr:'<path d="M5 12h14M13 6l6 6-6 6"/>',
+  sync:'<path d="M20 4.5V10h-5.5M4 19.5V14h5.5M19.6 10a8 8 0 0 0-13.9-3.2L4 9M4.4 14a8 8 0 0 0 13.9 3.2L20 15"/>',
 };
 const icon = n => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(ICONS[n]||'')+'</svg>';
 
@@ -1135,6 +1360,8 @@ function vDetail(id){
   });
   html += '</div>';
 
+  html += cardJira(p) + cardDmex(p);
+
   /* Actions */
   const acts = p.actions.slice().sort((a,b)=>(a.done?1:0)-(b.done?1:0));
   html += '<div class="card"><div class="card-head"><h2 class="card-title">Actions & réserves</h2>'+
@@ -1208,6 +1435,73 @@ function vDetail(id){
 
 const meta = (label, val) => '<div class="meta-item"><div class="m-label">'+esc(label)+'</div><div class="m-val">'+(val?esc(val):'<span class="muted">—</span>')+'</div></div>';
 
+/* ---------- Cartes Jira & DMEX de la fiche ---------- */
+
+function cardJira(p){
+  const s = p.sync, busy = !!syncing[p.id];
+  const counts = {new:0, indeterminate:0, done:0};
+  s.issues.forEach(i=>{ if(counts[i.statusCat]!=null) counts[i.statusCat]++; });
+  let html = '<div class="card"><div class="card-head"><h2 class="card-title">Tickets Jira</h2>'+
+    '<span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+
+    (s.issues.length ? chip(counts.new+' à faire','na')+chip(counts.indeterminate+' en cours','info')+chip(counts.done+' terminés','good') : '')+
+    '<button class="btn btn-s" data-action="sync-platform" data-id="'+esc(p.id)+'"'+(busy?' disabled':'')+'>'+
+      (busy ? 'Synchronisation…' : icon('sync')+'Synchroniser Jira &amp; DMEX')+'</button>'+
+    '</span></div>';
+  html += '<div class="int-bar"><label for="jql-'+esc(p.id)+'">JQL</label>'+
+    '<input id="jql-'+esc(p.id)+'" value="'+esc(p.jiraJql)+'" placeholder="project = KAAS AND labels = mise-en-exploitation ORDER BY updated DESC" data-change="jira-jql" data-id="'+esc(p.id)+'"></div>';
+  if(s.jiraError) html += '<div class="int-error">'+esc(s.jiraError)+'</div>';
+  if(s.issues.length){
+    html += '<div class="jscroll"><table class="jtable"><thead><tr><th>Clé</th><th>Résumé</th><th>Statut</th><th>Assigné</th><th>Maj</th></tr></thead><tbody>'+
+      s.issues.map(i=>{
+        const c = jiraCat(i.statusCat);
+        return '<tr><td class="jkey">'+(i.url?'<a href="'+esc(i.url)+'" target="_blank" rel="noopener">'+esc(i.key)+'</a>':esc(i.key))+'</td>'+
+          '<td>'+esc(i.summary)+'</td>'+
+          '<td>'+chip(i.status||c.label, c.cls)+'</td>'+
+          '<td>'+esc(i.assignee||'—')+'</td>'+
+          '<td class="mono tiny muted" style="white-space:nowrap">'+(i.updated?fmtD(i.updated.slice(0,10)):'—')+'</td></tr>';
+      }).join('')+'</tbody></table></div>';
+  } else if(!s.jiraError){
+    html += p.jiraJql.trim()
+      ? '<p class="empty-note">Aucun ticket synchronisé pour l’instant — cliquez sur « Synchroniser ».</p>'
+      : '<p class="empty-note">Renseignez la JQL du chantier puis synchronisez. Le relais se configure dans <a href="#/parametres">Paramètres</a>.</p>';
+  }
+  if(s.at || s.more){
+    html += '<div class="int-foot">'+(s.at?'<span>Synchronisé le '+esc(fmtTs(s.at))+'</span>':'')+
+      (s.more?'<span>50 premiers tickets affichés</span>':'')+'</div>';
+  }
+  return html+'</div>';
+}
+
+function cardDmex(p){
+  const s = p.sync;
+  let html = '<div class="card"><div class="card-head"><h2 class="card-title">DMEX — Dossier de mise en exploitation</h2>'+
+    (p.dmexPages.length?'<span class="cat-count">'+p.dmexPages.length+' page'+(p.dmexPages.length>1?'s':'')+'</span>':'')+'</div>';
+  html += '<form class="note-form" data-submit="add-dmex" data-id="'+esc(p.id)+'">'+
+    '<input name="url" placeholder="Coller l’URL d’une page Confluence (…/wiki/spaces/…/pages/…)" autocomplete="off">'+
+    '<button class="btn" type="submit">Ajouter</button></form>';
+  if(s.dmexError) html += '<div class="int-error">'+esc(s.dmexError)+'</div>';
+  if(p.dmexPages.length){
+    const metaById = {}; s.pages.forEach(m=>{ metaById[String(m.id)] = m; });
+    html += p.dmexPages.map(d=>{
+      const m = metaById[String(d.id)];
+      const url = (m && m.url) || d.url;
+      const title = m ? m.title : 'Page '+d.id;
+      const old = m && !m.missing && m.when && (Date.now()-Date.parse(m.when)) > 183*86400000;
+      return '<div class="dmex-row"><div class="dmex-main">'+
+        '<div class="dmex-title">'+(url?'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(title)+'</a>':esc(title))+'</div>'+
+        '<div class="dmex-meta">'+(m && !m.missing
+          ? esc(m.space||'—')+' · v.'+m.version+(m.by?' · par '+esc(m.by):'')+(m.when?' · le '+fmtD(String(m.when).slice(0,10)):'')
+          : (m && m.missing ? 'Page introuvable ou accès refusé' : 'En attente de synchronisation'))+'</div></div>'+
+        (old?chip('> 6 mois','warn'):'')+
+        '<button class="icon-btn" data-action="del-dmex" data-id="'+esc(p.id)+'" data-page="'+esc(d.id)+'" title="Retirer" aria-label="Retirer la page">'+icon('trash')+'</button>'+
+      '</div>';
+    }).join('');
+  } else {
+    html += '<p class="empty-note">Rattachez ici les pages Confluence du DMEX : elles s’affichent avec leur version, leur auteur et leur dernière mise à jour.</p>';
+  }
+  return html+'</div>';
+}
+
 /* ---------- Vue : équipes ---------- */
 
 function vTeams(){
@@ -1249,6 +1543,25 @@ function vSettings(){
     '</div>'+
     '<div class="set-row" style="align-items:flex-start"><textarea id="io-area" class="io" placeholder="Collez ici un export JSON puis cliquez sur Importer."></textarea></div>'+
     '<div class="set-row"><button class="btn btn-primary" data-action="import-apply">Importer ces données</button></div></div>';
+
+  const it = state.integrations;
+  const fileHint = (location.protocol==='file:' && !it.relayUrl)
+    ? '<p class="tiny" style="color:var(--warn); margin-top:8px">Page ouverte en fichier local : lancez le relais puis ouvrez l’application via son URL (http://…:8765/), ou renseignez ci-dessus l’URL du relais (démarré avec --open-cors).</p>' : '';
+  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Intégration Atlassian (Jira &amp; Confluence Cloud)</h2>'+
+    '<p class="tiny muted" style="margin-bottom:10px; max-width:80ch">Atlassian Cloud bloque les appels directs depuis une page web (CORS) : les requêtes passent par le relais interne en lecture seule <span class="mono">relay.py</span> (voir README), qui garde le jeton API côté serveur — aucun secret n’est stocké dans le navigateur.</p>'+
+    '<div class="set-row"><label for="int-relay">URL du relais (vide = même origine que cette page)</label>'+
+    '<input id="int-relay" data-change="int-relay" value="'+esc(it.relayUrl)+'" placeholder="http://relais-interne:8765" style="min-width:280px" class="mono"></div>'+
+    '<div class="set-row"><label for="int-site">URL du site Atlassian (pour les liens vers les tickets)</label>'+
+    '<input id="int-site" data-change="int-site" value="'+esc(it.siteUrl)+'" placeholder="https://mon-entreprise.atlassian.net" style="min-width:280px" class="mono"></div>'+
+    '<div class="set-row">'+
+      '<button class="btn" data-action="test-atl" data-kind="jira">Tester Jira</button>'+
+      '<button class="btn" data-action="test-atl" data-kind="confluence">Tester Confluence</button>'+
+    '</div>'+
+    ['jira','confluence'].map(k=>ui.test[k]
+      ? '<div class="test-line '+(ui.test[k].ok?'ok':(ui.test[k].pending?'':'ko'))+'">'+esc((k==='jira'?'Jira : ':'Confluence : ')+ui.test[k].msg)+'</div>'
+      : '').join('')+
+    fileHint+
+  '</div>';
 
   html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Réinitialisation</h2>'+
     '<div class="set-row"><label>Recharger le jeu de démonstration (remplace tout)</label>'+
@@ -1474,13 +1787,8 @@ function importData(txt){
   let s;
   try{ s = JSON.parse(txt); }catch(e){ toast('JSON invalide','crit'); return; }
   if(!s || !Array.isArray(s.platforms) || !Array.isArray(s.teams)){ toast('Format inattendu : export Passerelle requis','crit'); return; }
-  s.settings = Object.assign({readyThreshold:90}, s.settings||{});
   s.version = 1;
-  s.platforms.forEach(p=>{
-    p.checklist = p.checklist||[]; p.actions = p.actions||[]; p.journal = p.journal||[];
-    p.gonogo = p.gonogo||{decision:null,date:'',comment:''};
-  });
-  state = s;
+  state = normalizeState(s);
   saveState(); render();
   toast('Données importées : '+s.platforms.length+' plateforme'+(s.platforms.length>1?'s':''),'good');
 }
@@ -1553,6 +1861,24 @@ document.addEventListener('click', e=>{
         state.platforms.forEach(pp=>pp.checklist.forEach(i=>{ if(i.team===t.id) i.team=''; }));
         closeModal(); saveState(); render(); toast('Équipe supprimée');
       }
+      return;
+    }
+    if(a==='sync-platform' && p){ syncPlatform(p); return; }
+    if(a==='del-dmex' && p){
+      const pageId = String(actEl.dataset.page);
+      p.dmexPages = p.dmexPages.filter(d=>String(d.id)!==pageId);
+      p.sync.pages = p.sync.pages.filter(m=>String(m.id)!==pageId);
+      saveState(); render(); toast('Page DMEX retirée');
+      return;
+    }
+    if(a==='test-atl'){
+      const kind = actEl.dataset.kind;
+      ui.test[kind] = {msg:'test en cours…', pending:true};
+      render();
+      (kind==='jira' ? jiraMyself() : confluenceCurrentUser())
+        .then(u=>{ ui.test[kind] = {msg:'OK — connecté en tant que '+(u.displayName||'?'), ok:true}; })
+        .catch(e=>{ ui.test[kind] = {msg:'échec — '+e.message}; })
+        .then(()=>render());
       return;
     }
     if(a==='hide-seed-banner'){ state.seedBannerHidden = true; saveState(); render(); return; }
@@ -1644,6 +1970,17 @@ document.addEventListener('submit', e=>{
     const note = val('note');
     if(p && note){ logJ(p, note); saveState(); render(); }
   }
+  if(kind==='add-dmex'){
+    const p = state.platforms.find(x=>x.id===f.dataset.id);
+    if(!p) return;
+    const r = parsePageId(val('url'));
+    if(r.error){ toast(r.error,'crit'); return; }
+    if(p.dmexPages.some(d=>String(d.id)===r.id)){ toast('Cette page est déjà rattachée'); return; }
+    p.dmexPages.push({url:r.url, id:r.id});
+    logJ(p, 'Page DMEX rattachée (id '+r.id+').');
+    saveState(); render();
+    toast('Page ajoutée — synchronisez pour récupérer ses informations');
+  }
 });
 
 document.addEventListener('change', e=>{
@@ -1659,7 +1996,10 @@ document.addEventListener('change', e=>{
     state.settings.readyThreshold = v; saveState(); render(); toast('Seuil de préparation : '+v+' %');
     return;
   }
+  if(k==='int-relay'){ state.integrations.relayUrl = el.value.trim(); saveState(); toast('URL du relais enregistrée'); return; }
+  if(k==='int-site'){ state.integrations.siteUrl = el.value.trim(); saveState(); toast('URL Atlassian enregistrée'); return; }
   if(p){
+    if(k==='jira-jql'){ p.jiraJql = el.value.trim(); saveState(); render(); return; }
     const it = el.dataset.item ? p.checklist.find(i=>i.id===el.dataset.item) : null;
     if(k==='item-team' && it){ it.team = el.value; saveState(); render(); }
     if(k==='item-due' && it){ it.due = el.value; saveState(); render(); }
@@ -1710,7 +2050,7 @@ window.addEventListener('hashchange', render);
     state = buildSeed();
     saveState();
   }
-  state.settings = Object.assign({readyThreshold:90}, state.settings||{});
+  normalizeState(state);
   render();
 })();
 </script>
