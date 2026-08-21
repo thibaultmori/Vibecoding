@@ -12,6 +12,14 @@ services:
       ATL_EMAIL: "compte-service@mon-entreprise.fr"
       ATL_TOKEN: "${ATL_TOKEN:?définir ATL_TOKEN dans .env}"
       BACKUP_KEEP: "14"
+      # Notifications (voir EXPLOITATION.md) — laisser vide pour désactiver
+      # SMTP_HOST: "smtp.mon-entreprise.fr"
+      # SMTP_FROM: "Passerelle <svc-passerelle@mon-entreprise.fr>"
+      # NOTIFY_EMAIL: "dl-direction-infra@mon-entreprise.fr"
+      # TEAMS_WEBHOOK_URL: "${TEAMS_WEBHOOK_URL}"
+      # PUBLIC_URL: "https://passerelle.mon-entreprise.fr"
+      # NOTIFY_HOUR: "8"
+      # DIGEST_DAY: "1"
     volumes:
       - passerelle-data:/data
     # Ne PAS publier ce port directement : seul oauth2-proxy doit y accéder.

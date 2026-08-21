@@ -407,6 +407,90 @@ function check(name, cond, detail) {
   });
   check('conflit de révision → 409', conflict === 409, conflict);
 
+  /* ---------- 13. Phase 2 : référentiel, double validation, activité, recherche, champs ---------- */
+  const ctxAdmin = await browser.newContext({ viewport: { width: 1400, height: 900 },
+    extraHTTPHeaders: { 'X-Auth-Request-Email': 'admin@test', 'X-Auth-Request-Preferred-Username': 'Anne Admin' } });
+  const pd = await ctxAdmin.newPage();
+  pd.on('pageerror', e => errors.push('srv-admin: ' + e.message));
+  pd.on('dialog', d => d.accept());
+
+  /* Référentiel : l'admin ajoute un item réservé aux C1, puis enregistre */
+  await pd.goto(SRV_URL + '/#/referentiel');
+  await pd.waitForTimeout(700);
+  check('vue Référentiel (admin, éditable)', await pd.locator('button[data-action="ref-save"]').count() === 1);
+  await pd.click('button[data-action="ref-add-item"]');
+  await pd.waitForTimeout(200);
+  const newItem = pd.locator('.ref-row input[data-change="ref-item-label"]').last();
+  await newItem.fill('Exigence spéciale C1');
+  await newItem.blur();
+  for (const c of ['C2', 'C3', 'C4']) await pd.locator('.ref-row input[data-c="' + c + '"]').last().uncheck();
+  await pd.click('button[data-action="ref-save"]');
+  await pd.waitForTimeout(900);
+  check('référentiel v1 enregistré', (await pd.locator('#view').textContent()).includes('version 1'));
+
+  /* Instanciation par criticité : C1 reçoit le nouvel item, C3 non */
+  const mkFiche = async (name, crit) => {
+    await pd.goto(SRV_URL + '/#/plateformes');
+    await pd.waitForTimeout(300);
+    await pd.click('button[data-action="new-platform"]');
+    await pd.fill('#fp-name', name);
+    await pd.selectOption('#fp-crit', crit);
+    await pd.click('.modal button[type="submit"]');
+    await pd.waitForTimeout(700);
+    return pd.locator('#view').textContent();
+  };
+  check('fiche C1 : item réservé C1 présent', (await mkFiche('Fiche critique C1', 'C1')).includes('Exigence spéciale C1'));
+  check('fiche C3 : item réservé C1 absent', !(await mkFiche('Fiche standard C3', 'C3')).includes('Exigence spéciale C1'));
+
+  /* Double validation : Alice (contributrice) propose un Go sur la C1, admin contre-valide */
+  await pa.goto(SRV_URL + '/#/plateformes');
+  await pa.waitForTimeout(600);
+  await pa.click('tr:has-text("Fiche critique C1")');
+  await pa.waitForTimeout(500);
+  await pa.fill('#gng-comment', 'Go proposé (test e2e)');
+  await pa.click('button[data-action="decide"][data-d="go"]');
+  await pa.waitForTimeout(800);
+  const pendTxt = await pa.locator('#view').textContent();
+  check('décision proposée, en attente de contre-validation', pendTxt.includes('En attente de contre-validation'));
+  check('le proposeur ne peut pas contre-valider', await pa.locator('button[data-action="confirm-decision"][disabled]').count() === 1);
+  const ficheHash = await pa.evaluate(() => location.hash);
+  await pd.goto(SRV_URL + '/' + ficheHash);
+  await pd.waitForTimeout(700);
+  await pd.click('button[data-action="confirm-decision"]');
+  await pd.waitForTimeout(800);
+  const confTxt = await pd.locator('#view').textContent();
+  check('contre-validation effective → MEP', confTxt.includes('contre-validée par Anne Admin') && confTxt.includes('Mise en production'));
+
+  /* Activité (audit) */
+  await pd.goto(SRV_URL + '/#/activite');
+  await pd.waitForTimeout(900);
+  const auTxt = await pd.locator('#view').textContent();
+  check('vue Activité : audit nominatif affiché', auTxt.includes('création') && auTxt.includes('alice@test'));
+
+  /* Recherche globale */
+  await pd.goto(SRV_URL + '/#/recherche');
+  await pd.waitForTimeout(300);
+  await pd.fill('#gsearch', 'Exigence spéciale');
+  await pd.waitForTimeout(500);
+  const srTxt = await pd.locator('#view').textContent();
+  check('recherche globale : item de checklist trouvé', srTxt.includes('Checklist') && srTxt.includes('Fiche critique C1'));
+
+  /* Champ personnalisé */
+  await pd.goto(SRV_URL + '/#/parametres');
+  await pd.waitForTimeout(400);
+  await pd.fill('form[data-submit="cf-add"] input[name="label"]', 'Code CMDB');
+  await pd.click('form[data-submit="cf-add"] button');
+  await pd.waitForTimeout(700);
+  await pd.goto(SRV_URL + '/' + ficheHash);
+  await pd.waitForTimeout(400);
+  await pd.click('button[data-action="edit-platform"]');
+  await pd.waitForTimeout(300);
+  await pd.fill('.modal input[name^="cf_"]', 'CI0042');
+  await pd.click('.modal button[type="submit"]');
+  await pd.waitForTimeout(700);
+  check('champ personnalisé affiché en méta', (await pd.locator('.meta-grid').textContent()).includes('CI0042'));
+
+  await ctxAdmin.close();
   await ctxAlice.close();
   await ctxBob.close();
   srv.kill();

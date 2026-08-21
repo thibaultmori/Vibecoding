@@ -1,5 +1,15 @@
 # Journal des versions — Passerelle
 
+## 2.1.0 — 2026-08-21 · Collaboration & gouvernance (phase 2)
+
+- **Notifications** (mode partagé) : balayage quotidien à heure fixe — un e-mail par équipe (adresse du champ contact) listant ses éléments de checklist dus sous 7 jours ou en retard, plus une synthèse globale (dates cibles dépassées, actions bloquantes en retard, revues à tenir, décisions à contre-valider) vers une adresse de direction et/ou une **carte Teams** (webhook Workflows, format Adaptive Card v1.2 — les connecteurs O365 historiques sont retirés) ; digest hebdomadaire ; en-têtes d'automate anti-réponses d'absence ; aucun envoi s'il n'y a rien à dire ; endpoint d'exploitation `POST /api/notify/run` (admin).
+- **Double validation Go/No-Go (« quatre yeux »)** : sur les criticités configurées (défaut C1 et C2), une décision est d'abord *proposée* puis doit être **contre-validée par un autre contributeur** avant de prendre effet — le serveur garantit les signatures (identité SSO, proposeur ≠ contre-validateur, 403 sinon). Alerte « à contre-valider » au tableau de bord et dans les notifications.
+- **Référentiel de checklist administrable** : nouvelle vue « Référentiel » (admin) — catégories, éléments et **criticités applicables** par élément, versionné côté serveur ; les nouvelles fiches sont instanciées selon leur criticité ; « Appliquer aux fiches en cours » ajoute les éléments manquants ; un changement de criticité complète automatiquement la checklist.
+- **Vue « Activité »** : le journal d'audit nominatif du serveur, consultable et filtrable par tous.
+- **Recherche globale** : nouvelle vue (raccourci `/`) sur fiches, checklists, actions, journaux, tickets Jira et pages DMEX, extraits surlignés.
+- **Champs personnalisés** : champs texte définis par les administrateurs (ex. code CMDB), saisis à l'édition et affichés dans l'en-tête des fiches.
+- Tests : 152 contrôles automatisés en CI (77 applicatifs Playwright dont le parcours de contre-validation multi-navigateurs, 51 API/serveur dont notifications sur stubs SMTP/Teams, 24 relais).
+
 ## 2.0.0 — 2026-08-20 · Référentiel partagé multi-utilisateurs (phase 1)
 
 Le passage en production : les données quittent le navigateur de chacun pour un référentiel commun, authentifié et supervisé.

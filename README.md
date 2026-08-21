@@ -36,6 +36,10 @@ ou sans Docker : `ADMIN_EMAILS=chef@… python3 server.py` derrière votre proxy
   - **Fiche imprimable** pour la revue de mise en exploitation.
 - **Liste des plateformes** : recherche, filtres (étape, criticité, statut, équipe), tris.
 - **Équipes** : référentiel des équipes de la direction, affectées aux éléments de checklist.
+- **Notifications** (mode partagé) : e-mail quotidien par équipe (échéances sous 7 jours et retards), synthèse globale et digest hebdomadaire vers une adresse de direction et/ou un canal Teams (webhook Workflows) — voir EXPLOITATION.md.
+- **Double validation Go/No-Go** : sur les criticités configurées (défaut C1/C2), la décision proposée doit être contre-validée par un autre contributeur — signatures garanties par le serveur.
+- **Référentiel administrable** (mode partagé, admin) : catégories, éléments et criticités applicables, versionné ; application aux fiches en cours en un clic.
+- **Activité** : journal d'audit nominatif consultable ; **Recherche globale** (touche `/`) sur tout le contenu ; **champs personnalisés** définis par les administrateurs.
 - **Paramètres** : export JSON (téléchargement ou copie), import (fichier ou collage), seuil de préparation, réinitialisation.
 - **Intégration Jira & Confluence Cloud** : tickets du chantier récupérés par JQL et pages DMEX (Dossier de Mise En eXploitation) rattachées à chaque fiche, avec version, auteur et fraîcheur — voir la section dédiée ci-dessous.
 - **Thèmes clair et sombre** (suit le réglage du système), interface responsive (poste de travail, tablette, mobile).
@@ -113,12 +117,12 @@ La page publiée en Artifact bloque tout appel réseau : la synchronisation y é
 
 ## Qualité
 
-- Suite de tests versionnée : `npm install` puis `npm test` — 98 contrôles : parcours applicatif complet et scénario multi-utilisateurs réel (`tests/e2e.js`, Playwright, deux navigateurs avec SSE), API/rôles/conflits/audit (`tests/server.sh`), relais (`tests/relay.sh`).
+- Suite de tests versionnée : `npm install` puis `npm test` — 152 contrôles : parcours applicatif complet et scénarios multi-utilisateurs réels, contre-validation comprise (`tests/e2e.js`, Playwright), API/rôles/conflits/audit/notifications sur stubs SMTP et Teams (`tests/server.sh`), relais (`tests/relay.sh`).
 - Intégration continue GitHub Actions (`.github/workflows/ci.yml`) à chaque push.
 - Versions : `CHANGELOG.md` ; la version courante est affichée dans l'application et incluse dans les exports.
 
 ## Limites connues et suite possible
 
 - En **mode local**, les données restent propres à chaque navigateur (échange par export/import JSON) — le mode partagé v2 est fait pour l'usage d'équipe.
-- Pas encore de notifications d'échéances, de modèles de checklist administrables dans l'interface ni de recherche globale : phase 2 de la feuille de route. Pilotage historisé et écriture Jira : phase 3.
+- Pilotage historisé (tendances, délais par étape) et écriture Jira (création de tickets depuis les actions) : phase 3 de la feuille de route.
 - Intégration Atlassian : 50 premiers tickets par JQL (mention affichée au-delà), liens courts Confluence `/wiki/x/…` non résolus (coller l'URL complète), instances Server/Data Center non couvertes (endpoints différents), pas de relance automatique sur limitation 429 (le message affiche le délai à respecter).
