@@ -33,24 +33,30 @@ confiance aux en-têtes d'identité, il ne doit donc être joignable QUE par le 
 """
 import argparse
 import base64
+import email.utils
 import glob
 import gzip
 import json
 import os
 import queue
 import shutil
+import smtplib
+import socket
 import sqlite3
+import ssl
 import sys
 import threading
 import time
 import urllib.error
-from datetime import datetime
+import urllib.request
+from datetime import datetime, timedelta
+from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import relay  # liste blanche Atlassian, en-têtes relayés, opener sans redirection
 
-VERSION = '2.0.0'
+VERSION = '2.1.0'
 MAX_DOC = 512 * 1024          # taille maximale d'une fiche (JSON)
 MAX_IMPORT = 20 * 1024 * 1024  # taille maximale d'un import complet
 ROLES = ('admin', 'contributeur', 'lecteur')
@@ -81,6 +87,19 @@ def load_conf(args):
         atl_site=env('ATL_SITE', '').rstrip('/'),
         atl_auth='',
         backup_keep=max(1, int(env('BACKUP_KEEP', '14') or 14)),
+        notify=dict(
+            smtp_host=env('SMTP_HOST', ''),
+            smtp_port=int(env('SMTP_PORT', '25') or 25),
+            smtp_from=env('SMTP_FROM', 'passerelle@localhost'),
+            smtp_tls=env('SMTP_STARTTLS', '') in ('1', 'true', 'yes'),
+            smtp_user=env('SMTP_USER', ''),
+            smtp_pass=env('SMTP_PASS', ''),
+            teams=env('TEAMS_WEBHOOK_URL', ''),
+            global_email=env('NOTIFY_EMAIL', ''),
+            hour=min(23, max(0, int(env('NOTIFY_HOUR', '8') or 8))),
+            digest_day=min(7, max(1, int(env('DIGEST_DAY', '1') or 1))),  # 1=lundi … 7=dimanche
+            public_url=env('PUBLIC_URL', '').rstrip('/'),
+        ),
     )
     if not os.path.isfile(conf['app']):
         sys.exit('Application introuvable : ' + conf['app'])
@@ -122,7 +141,8 @@ def init_db():
         ''')
         defaults = (
             ('teams', '[]'),
-            ('settings', json.dumps({'readyThreshold': 90, 'dmexLabel': 'asset-dip', 'siteUrl': ''})),
+            ('settings', json.dumps({'readyThreshold': 90, 'dmexLabel': 'asset-dip', 'siteUrl': '',
+                                     'gonogoValidation': 'C1C2', 'customFields': []})),
         )
         for key, val in defaults:
             c.execute('INSERT OR IGNORE INTO docs(key,rev,json,updated_at,updated_by) VALUES(?,1,?,?,?)',
@@ -246,6 +266,242 @@ def backup_loop():
         time.sleep(3600)
 
 
+# ---------- Notifications (e-mail SMTP + carte Teams via webhook Workflows) ----------
+
+STAGE_ORDER = ('cadrage', 'build', 'recette', 'preprod', 'gonogo', 'mep', 'vsr', 'run')
+GONOGO_LBL = {'go': 'GO', 'go_reserves': 'GO avec réserves', 'nogo': 'NO-GO'}
+
+
+def notify_active():
+    n = CONF['notify']
+    return bool(n['smtp_host'] or n['teams'])
+
+
+def notify_channels():
+    n = CONF['notify']
+    ch = []
+    if n['smtp_host']:
+        ch.append('email')
+    if n['teams']:
+        ch.append('teams')
+    return '+'.join(ch) or 'off'
+
+
+def plat_link(pid):
+    pu = CONF['notify']['public_url']
+    return (pu + '/#/plateforme/' + pid) if pu else ''
+
+
+def notify_scan():
+    """Analyse le référentiel : lignes d'échéances par e-mail d'équipe + lignes globales."""
+    today = time.strftime('%Y-%m-%d')
+    soon = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
+    with db() as c:
+        platforms = [json.loads(r['json']) for r in c.execute('SELECT json FROM platforms')]
+        teams = json.loads(c.execute("SELECT json FROM docs WHERE key='teams'").fetchone()['json'])
+    contact = {t.get('id'): str(t.get('contact', '')).strip()
+               for t in teams if isinstance(t, dict) and '@' in str(t.get('contact', ''))}
+    tname = {t.get('id'): t.get('name', '') for t in teams if isinstance(t, dict)}
+    per_team, glob_lines = {}, []
+    for p in platforms:
+        if not isinstance(p, dict) or p.get('stage') == 'run':
+            continue
+        name = p.get('name', '?')
+        link = plat_link(str(p.get('id', '')))
+        suffix = ('\n    ' + link) if link else ''
+        idx = STAGE_ORDER.index(p['stage']) if p.get('stage') in STAGE_ORDER else 0
+        td = str(p.get('targetDate', ''))
+        if td and idx < STAGE_ORDER.index('mep') and td < today:
+            glob_lines.append('Date cible dépassée : %s (cible %s)%s' % (name, td, suffix))
+        gg = p.get('gonogo') or {}
+        if p.get('stage') == 'gonogo' and not gg.get('decision'):
+            glob_lines.append('Revue Go/No-Go à tenir : %s%s' % (name, suffix))
+        if gg.get('pending'):
+            glob_lines.append('Décision %s à contre-valider : %s (proposée par %s)%s'
+                              % (GONOGO_LBL.get(gg.get('decision'), '?'), name,
+                                 gg.get('decidedBy') or '?', suffix))
+        for a in p.get('actions') or []:
+            if isinstance(a, dict) and not a.get('done') and a.get('blocking') \
+                    and str(a.get('due', '')) and str(a['due']) < today:
+                glob_lines.append('Action bloquante en retard : %s — %s (échéance %s)%s'
+                                  % (a.get('label', ''), name, a['due'], suffix))
+        for it in p.get('checklist') or []:
+            if not isinstance(it, dict) or it.get('status') in ('done', 'na'):
+                continue
+            due = str(it.get('due', ''))
+            if not due or due > soon:
+                continue
+            line = '%s : %s — %s%s' % ('EN RETARD depuis le ' + due if due < today else 'Échéance ' + due,
+                                       it.get('label', ''), name, suffix)
+            mail = contact.get(it.get('team'))
+            if mail:
+                per_team.setdefault(mail, {'team': tname.get(it.get('team'), ''), 'lines': []})['lines'].append(line)
+            elif due < today:
+                glob_lines.append('Élément en retard (sans équipe joignable) : %s — %s' % (it.get('label', ''), name))
+    return per_team, glob_lines
+
+
+def send_email(to_addr, subject, body):
+    n = CONF['notify']
+    if not n['smtp_host']:
+        return False
+    msg = EmailMessage()
+    msg['From'] = n['smtp_from']
+    msg['To'] = to_addr
+    msg['Subject'] = subject
+    msg['Date'] = email.utils.formatdate(localtime=True)
+    msg['Message-ID'] = email.utils.make_msgid(domain=n['smtp_from'].split('@')[-1] or 'passerelle')
+    msg['Auto-Submitted'] = 'auto-generated'
+    msg['X-Auto-Response-Suppress'] = 'OOF, AutoReply'
+    footer = '\n\n—\nMessage automatique de Passerelle (mises en exploitation).'
+    if n['public_url']:
+        footer += '\n' + n['public_url']
+    msg.set_content(body + footer)
+    try:
+        with smtplib.SMTP(n['smtp_host'], n['smtp_port'], timeout=10,
+                          local_hostname=socket.gethostname() or 'passerelle') as s:
+            if n['smtp_tls']:
+                s.starttls(context=ssl.create_default_context())
+            if n['smtp_user']:
+                s.login(n['smtp_user'], n['smtp_pass'])
+            refused = s.send_message(msg)
+            if refused:
+                print(json.dumps({'ts': now(), 'msg': 'destinataires refusés',
+                                  'refused': list(refused)}, ensure_ascii=False), file=sys.stderr, flush=True)
+        return True
+    except OSError as e:  # couvre toutes les SMTPException depuis Python 3.4
+        print(json.dumps({'ts': now(), 'msg': 'échec envoi e-mail', 'to': to_addr,
+                          'err': '%s: %s' % (e.__class__.__name__, e)}, ensure_ascii=False),
+              file=sys.stderr, flush=True)
+        return False
+
+
+def send_teams(title, lines):
+    """Carte Adaptive v1.2 vers un webhook Teams Workflows. 202 = accepté (pas livré)."""
+    n = CONF['notify']
+    if not n['teams']:
+        return False
+    body = [{'type': 'TextBlock', 'size': 'Large', 'weight': 'Bolder', 'text': title, 'wrap': True},
+            {'type': 'TextBlock', 'wrap': True, 'text': '\n'.join('- ' + l.split('\n')[0] for l in lines) or 'Rien à signaler.'}]
+    if n['public_url']:
+        body.append({'type': 'TextBlock', 'wrap': True,
+                     'text': '[Ouvrir Passerelle](%s)' % n['public_url']})
+    payload = json.dumps({
+        'type': 'message',
+        'attachments': [{
+            'contentType': 'application/vnd.microsoft.card.adaptive',
+            'contentUrl': None,
+            'content': {'$schema': 'http://adaptivecards.io/schemas/adaptive-card.json',
+                        'type': 'AdaptiveCard', 'version': '1.2',
+                        'msteams': {'width': 'Full'}, 'body': body},
+        }],
+    }, ensure_ascii=False).encode()
+    req = urllib.request.Request(n['teams'], data=payload, method='POST',
+                                 headers={'Content-Type': 'application/json'})
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as up:
+                if up.status in (200, 202):
+                    return True
+                return False
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt == 1:
+                time.sleep(3)
+                continue
+            print(json.dumps({'ts': now(), 'msg': 'échec webhook Teams', 'code': e.code}),
+                  file=sys.stderr, flush=True)
+            return False
+        except OSError as e:
+            if attempt == 1:
+                time.sleep(3)
+                continue
+            print(json.dumps({'ts': now(), 'msg': 'échec webhook Teams', 'err': str(e)}),
+                  file=sys.stderr, flush=True)
+            return False
+    return False
+
+
+def notify_state_get():
+    with db() as c:
+        row = c.execute("SELECT json FROM docs WHERE key='notify_state'").fetchone()
+    return json.loads(row['json']) if row else {}
+
+
+def notify_state_set(st):
+    with db() as c:
+        c.execute('INSERT INTO docs(key,rev,json,updated_at,updated_by) VALUES(?,1,?,?,?) '
+                  'ON CONFLICT(key) DO UPDATE SET json=excluded.json, updated_at=excluded.updated_at',
+                  ('notify_state', json.dumps(st, ensure_ascii=False), now(), 'système'))
+
+
+def notify_daily():
+    """Balayage quotidien : un e-mail par équipe concernée + synthèse globale (e-mail + Teams)."""
+    n = CONF['notify']
+    per_team, glob_lines = notify_scan()
+    today = time.strftime('%Y-%m-%d')
+    sent = {'teamEmails': [], 'globalEmail': False, 'teams': False,
+            'teamLines': sum(len(v['lines']) for v in per_team.values()), 'globalLines': len(glob_lines)}
+    for mail, block in sorted(per_team.items()):
+        body = ('Bonjour,\n\nÉchéances de mise en exploitation pour l’équipe %s '
+                '(éléments à faire ou en cours, dus sous 7 jours ou en retard) :\n\n  - %s'
+                % (block['team'] or mail, '\n  - '.join(block['lines'])))
+        if send_email(mail, '[Passerelle] Échéances %s — %s' % (block['team'] or '', today), body):
+            sent['teamEmails'].append(mail)
+    if glob_lines:
+        if n['global_email']:
+            sent['globalEmail'] = send_email(
+                n['global_email'], '[Passerelle] Points d’attention — ' + today,
+                'Points d’attention du jour :\n\n  - ' + '\n  - '.join(glob_lines))
+        sent['teams'] = send_teams('Passerelle — points d’attention du ' + today, glob_lines)
+    st = notify_state_get()
+    st['dailySent'] = today
+    notify_state_set(st)
+    print(json.dumps({'ts': now(), 'msg': 'notifications quotidiennes', **{k: v for k, v in sent.items()}},
+                     ensure_ascii=False), file=sys.stderr, flush=True)
+    return sent
+
+
+def notify_digest():
+    """Digest hebdomadaire global : synthèse du portefeuille."""
+    n = CONF['notify']
+    today = time.strftime('%Y-%m-%d')
+    with db() as c:
+        platforms = [json.loads(r['json']) for r in c.execute('SELECT json FROM platforms')]
+    active = [p for p in platforms if isinstance(p, dict) and p.get('stage') != 'run']
+    late = [p for p in active if str(p.get('targetDate', '')) and str(p['targetDate']) < today
+            and STAGE_ORDER.index(p.get('stage', 'cadrage')) < STAGE_ORDER.index('mep')]
+    blocked = [p for p in active if any(isinstance(a, dict) and a.get('blocking') and not a.get('done')
+                                        for a in p.get('actions') or [])]
+    nxt = sorted([p for p in active if p.get('targetDate')], key=lambda p: p['targetDate'])[:5]
+    lines = ['%d mise(s) en exploitation active(s) · %d bloquée(s) · %d en retard'
+             % (len(active), len(blocked), len(late))]
+    lines += ['Prochaine MEP : %s — cible %s' % (p.get('name', '?'), p['targetDate']) for p in nxt]
+    if n['global_email']:
+        send_email(n['global_email'], '[Passerelle] Digest hebdomadaire — ' + today,
+                   'Synthèse hebdomadaire :\n\n  - ' + '\n  - '.join(lines))
+    send_teams('Passerelle — digest hebdomadaire (' + today + ')', lines)
+    st = notify_state_get()
+    st['digestSent'] = time.strftime('%G-%V')
+    notify_state_set(st)
+
+
+def notify_loop():
+    while True:
+        try:
+            if notify_active():
+                nw = datetime.now()
+                st = notify_state_get()
+                if nw.hour >= CONF['notify']['hour'] and st.get('dailySent') != nw.strftime('%Y-%m-%d'):
+                    notify_daily()
+                if nw.isoweekday() == CONF['notify']['digest_day'] and nw.hour >= CONF['notify']['hour'] \
+                        and st.get('digestSent') != nw.strftime('%G-%V'):
+                    notify_digest()
+        except Exception as e:
+            print(json.dumps({'ts': now(), 'msg': 'échec notifications', 'err': str(e)}),
+                  file=sys.stderr, flush=True)
+        time.sleep(300)
+
+
 # ---------- Handler HTTP ----------
 
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; "
@@ -262,6 +518,25 @@ def row_platform(row):
 def row_doc(row):
     return {'rev': row['rev'], 'updatedAt': row['updated_at'],
             'updatedBy': row['updated_by'], 'data': json.loads(row['json'])}
+
+
+def gonogo_guard(old_data, new_data, user):
+    """Les signatures Go/No-Go sont garanties par le serveur : on ne peut signer
+    qu'avec sa propre identité, et le contre-validateur diffère du proposeur."""
+    old = old_data.get('gonogo') if isinstance(old_data.get('gonogo'), dict) else {}
+    new = new_data.get('gonogo') if isinstance(new_data.get('gonogo'), dict) else {}
+    o_dec = str(old.get('decidedByEmail') or '')
+    n_dec = str(new.get('decidedByEmail') or '')
+    o_conf = str(old.get('confirmedByEmail') or '')
+    n_conf = str(new.get('confirmedByEmail') or '')
+    if n_dec and n_dec != o_dec and n_dec != user['email']:
+        return 'Signature Go/No-Go refusée : la décision doit être signée par votre propre identité.'
+    if n_conf and n_conf != o_conf:
+        if n_conf != user['email']:
+            return 'Contre-validation refusée : elle doit être signée par votre propre identité.'
+        if n_conf == n_dec:
+            return 'Contre-validation refusée : le proposeur ne peut pas contre-valider sa propre décision.'
+    return ''
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -348,7 +623,8 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as c:
                     n = c.execute('SELECT COUNT(*) FROM platforms').fetchone()[0]
                 return self._json(200, {'ok': True, 'app': 'passerelle', 'version': VERSION,
-                                        'platforms': n, 'atlassian': bool(CONF['atl_site'])})
+                                        'platforms': n, 'atlassian': bool(CONF['atl_site']),
+                                        'notify': notify_channels()})
             except sqlite3.Error as e:
                 return self._json(500, {'ok': False, 'error': str(e)})
         if method == 'GET' and path == '/metrics':
@@ -393,7 +669,9 @@ class Handler(BaseHTTPRequestHandler):
                 plats = [row_platform(r) for r in c.execute('SELECT * FROM platforms')]
                 teams = row_doc(c.execute("SELECT * FROM docs WHERE key='teams'").fetchone())
                 settings = row_doc(c.execute("SELECT * FROM docs WHERE key='settings'").fetchone())
-            return self._json(200, {'platforms': plats, 'teams': teams, 'settings': settings})
+                trow = c.execute("SELECT * FROM docs WHERE key='template'").fetchone()
+            return self._json(200, {'platforms': plats, 'teams': teams, 'settings': settings,
+                                    'template': row_doc(trow) if trow else None})
 
         if method == 'GET' and path == '/api/events':
             return self.sse()
@@ -414,10 +692,14 @@ class Handler(BaseHTTPRequestHandler):
                 plats = [json.loads(r['json']) for r in c.execute('SELECT json FROM platforms')]
                 teams = json.loads(c.execute("SELECT json FROM docs WHERE key='teams'").fetchone()['json'])
                 st = json.loads(c.execute("SELECT json FROM docs WHERE key='settings'").fetchone()['json'])
+                trow = c.execute("SELECT json FROM docs WHERE key='template'").fetchone()
             payload = {'version': 1, 'appVersion': VERSION, 'exportedAt': now(),
                        'seeded': False, 'seedBannerHidden': True, 'lastExportAt': now(),
                        'platforms': plats, 'teams': teams,
-                       'settings': {'readyThreshold': st.get('readyThreshold', 90), 'userName': ''},
+                       'template': json.loads(trow['json']) if trow else None,
+                       'settings': {'readyThreshold': st.get('readyThreshold', 90),
+                                    'gonogoValidation': st.get('gonogoValidation', 'C1C2'),
+                                    'customFields': st.get('customFields', []), 'userName': ''},
                        'integrations': {'relayUrl': '', 'siteUrl': st.get('siteUrl', ''),
                                         'dmexLabel': st.get('dmexLabel', 'asset-dip'), 'relayToken': ''}}
             return self._json(200, payload,
@@ -445,6 +727,9 @@ class Handler(BaseHTTPRequestHandler):
             js = json.dumps(data, ensure_ascii=False)
             if len(js) > MAX_DOC:
                 return self._err(413, 'Fiche trop volumineuse (max 512 Ko).')
+            gerr = gonogo_guard({}, data, user)
+            if gerr:
+                return self._err(403, gerr)
             with db() as c:
                 try:
                     c.execute('INSERT INTO platforms(id,rev,json,updated_at,updated_by) VALUES(?,1,?,?,?)',
@@ -470,6 +755,12 @@ class Handler(BaseHTTPRequestHandler):
             if len(js) > MAX_DOC:
                 return self._err(413, 'Fiche trop volumineuse (max 512 Ko).')
             with db() as c:
+                row_old = c.execute('SELECT json FROM platforms WHERE id=?', (pid,)).fetchone()
+                if not row_old:
+                    return self._err(404, 'Fiche introuvable (supprimée ?).')
+                gerr = gonogo_guard(json.loads(row_old['json']), data, user)
+                if gerr:
+                    return self._err(403, gerr)
                 cur = c.execute('UPDATE platforms SET rev=rev+1, json=?, updated_at=?, updated_by=? '
                                 'WHERE id=? AND rev=?', (js, now(), user['name'], pid, rev))
                 if cur.rowcount == 0:
@@ -494,9 +785,9 @@ class Handler(BaseHTTPRequestHandler):
                        'instance': self.headers.get('X-Client-Instance', '')})
             return self._json(200, {'ok': True})
 
-        if method == 'PUT' and path in ('/api/teams', '/api/settings'):
+        if method == 'PUT' and path in ('/api/teams', '/api/settings', '/api/template'):
             key = path.rsplit('/', 1)[1]
-            if key == 'settings' and not admin:
+            if key in ('settings', 'template') and not admin:
                 return self._err(403, 'Réservé aux administrateurs.')
             if key == 'teams' and not write:
                 return self._err(403, 'Lecture seule : votre rôle ne permet pas de modifier.')
@@ -515,11 +806,26 @@ class Handler(BaseHTTPRequestHandler):
                                 'WHERE key=? AND rev=?', (js, now(), user['name'], key, rev))
                 if cur.rowcount == 0:
                     row = c.execute('SELECT * FROM docs WHERE key=?', (key,)).fetchone()
-                    return self._json(409, {'error': 'Conflit de version.', 'current': row_doc(row)})
+                    if row is None and key == 'template' and rev == 0:
+                        c.execute('INSERT INTO docs(key,rev,json,updated_at,updated_by) VALUES(?,1,?,?,?)',
+                                  (key, js, now(), user['name']))
+                    else:
+                        if row is None:
+                            return self._err(404, 'Document inconnu.')
+                        return self._json(409, {'error': 'Conflit de version.', 'current': row_doc(row)})
             audit(user['email'], key, key, '', rev + 1)
             broadcast({'type': key, 'rev': rev + 1, 'by': user['name'],
                        'instance': self.headers.get('X-Client-Instance', '')})
             return self._json(200, {'rev': rev + 1})
+
+        if method == 'POST' and path == '/api/notify/run':
+            if not admin:
+                return self._err(403, 'Réservé aux administrateurs.')
+            if not notify_active():
+                return self._err(503, 'Aucun canal de notification configuré (SMTP_HOST / TEAMS_WEBHOOK_URL).')
+            res = notify_daily()
+            audit(user['email'], 'notifications', '', '%d ligne(s)' % (res['teamLines'] + res['globalLines']), None)
+            return self._json(200, dict(res, ok=True))
 
         if method == 'POST' and path == '/api/import':
             if not admin:
@@ -533,7 +839,9 @@ class Handler(BaseHTTPRequestHandler):
             integ_in = body.get('integrations') or {}
             st = {'readyThreshold': settings_in.get('readyThreshold', 90),
                   'dmexLabel': integ_in.get('dmexLabel', 'asset-dip'),
-                  'siteUrl': integ_in.get('siteUrl', '')}
+                  'siteUrl': integ_in.get('siteUrl', ''),
+                  'gonogoValidation': settings_in.get('gonogoValidation', 'C1C2'),
+                  'customFields': settings_in.get('customFields', [])}
             with db() as c:
                 c.execute('DELETE FROM platforms')
                 seen = set()
@@ -551,6 +859,11 @@ class Handler(BaseHTTPRequestHandler):
                           (json.dumps(body['teams'], ensure_ascii=False), now(), user['name'], 'teams'))
                 c.execute('UPDATE docs SET rev=rev+1, json=?, updated_at=?, updated_by=? WHERE key=?',
                           (json.dumps(st, ensure_ascii=False), now(), user['name'], 'settings'))
+                if isinstance(body.get('template'), dict):
+                    c.execute('INSERT INTO docs(key,rev,json,updated_at,updated_by) VALUES(?,1,?,?,?) '
+                              'ON CONFLICT(key) DO UPDATE SET rev=rev+1, json=excluded.json, '
+                              'updated_at=excluded.updated_at, updated_by=excluded.updated_by',
+                              ('template', json.dumps(body['template'], ensure_ascii=False), now(), user['name']))
             audit(user['email'], 'import', '', '%d fiches' % len(seen), None)
             broadcast({'type': 'reload', 'by': user['name'],
                        'instance': self.headers.get('X-Client-Instance', '')})
@@ -602,7 +915,6 @@ class Handler(BaseHTTPRequestHandler):
         if not any(rx.match(upstream) for rx in relay.ALLOWED):
             return self._err(403, 'Chemin non autorisé par le relais (liste blanche en lecture seule).')
         url = CONF['atl_site'] + upstream + (('?' + query) if query else '')
-        import urllib.request
         req = urllib.request.Request(url, headers={
             'Authorization': CONF['atl_auth'],
             'Accept': 'application/json',
@@ -648,12 +960,14 @@ def main():
     CONF.update(load_conf(args))
     init_db()
     threading.Thread(target=backup_loop, daemon=True).start()
+    threading.Thread(target=notify_loop, daemon=True).start()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
     print(json.dumps({'ts': now(), 'msg': 'Passerelle v%s démarrée' % VERSION,
                       'url': 'http://%s:%d/' % (args.host, args.port),
                       'data': CONF['data_dir'], 'auth': CONF['auth_mode'],
-                      'atlassian': bool(CONF['atl_site'])}, ensure_ascii=False),
+                      'atlassian': bool(CONF['atl_site']),
+                      'notifications': notify_channels()}, ensure_ascii=False),
           file=sys.stderr, flush=True)
     try:
         srv.serve_forever()

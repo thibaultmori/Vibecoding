@@ -428,6 +428,14 @@ textarea.io{width:100%; min-height:110px; font-family:var(--mono); font-size:12p
 .empty p{max-width:46ch; margin:0 auto 16px}
 .empty .btn{margin:0 4px}
 
+/* Recherche globale & audit */
+mark{background:var(--accent-soft); color:var(--accent-ink); border-radius:3px; padding:0 2px}
+.ref-row{display:flex; align-items:center; gap:8px; padding:6px 18px; border-top:1px dashed var(--line); flex-wrap:wrap}
+.ref-row input[type="text"],.ref-row input:not([type]){flex:1; min-width:180px; padding:5px 8px; font-size:13px}
+.ref-crits{display:flex; gap:8px; flex-wrap:wrap}
+.ref-crits label{display:flex; align-items:center; gap:3px; font-size:11.5px; color:var(--ink2); font-family:var(--mono)}
+.ref-crits input{width:13px; height:13px; accent-color:var(--accent)}
+
 /* ============ Impression ============ */
 @media print{
   body{background:#fff; color:#111}
@@ -497,7 +505,7 @@ textarea.io{width:100%; min-height:110px; font-family:var(--mono); font-size:12p
    Application autonome : aucune dépendance, stockage local navigateur.
    ================================================================= */
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 
 /* Mode serveur (v2) : détecté au démarrage si la page est servie par server.py.
    Sinon, l'application reste en mode local (localStorage), comme en v1. */
@@ -505,7 +513,8 @@ let serverMode = false;
 let me = null; /* {email, name, role} — identité transmise par le proxy SSO */
 const INSTANCE_ID = 'i' + Math.random().toString(36).slice(2, 10);
 const shadow = {plat:{}, teams:'', settings:''};
-const revs = {plat:{}, teams:0, settings:0};
+const revs = {plat:{}, teams:0, settings:0, template:0};
+let serverTemplate = null; /* référentiel de checklist administré côté serveur (null = TEMPLATE intégré) */
 
 /* ---------- Constantes métier ---------- */
 
@@ -593,7 +602,29 @@ const TEMPLATE = [
     'Conformité RGPD vérifiée (données personnelles)',
   ]},
 ];
-const catOf = id => TEMPLATE.find(c=>c.id===id) || {id, label:id, team:''};
+const catOf = id => getTemplate().find(c=>c.id===id) || {id, label:id, team:''};
+
+/* Référentiel actif : administré côté serveur si présent, sinon le TEMPLATE intégré.
+   Les items du référentiel serveur sont des objets {id, label, crits:[…]} ;
+   ceux du TEMPLATE intégré sont des chaînes (id implicite = rang). */
+function getTemplate(){
+  return (serverMode && serverTemplate && Array.isArray(serverTemplate.cats)) ? serverTemplate.cats : TEMPLATE;
+}
+function templateItemId(cat, item, index){
+  return (item && typeof item==='object' && item.id) ? cat.id+'.'+item.id : cat.id+'.'+(index+1);
+}
+function templateItemLabel(item){
+  return typeof item==='string' ? item : String((item&&item.label)||'');
+}
+function templateItemCrits(item){
+  return (item && typeof item==='object' && Array.isArray(item.crits) && item.crits.length) ? item.crits : null;
+}
+/* Convertit le TEMPLATE intégré en structure éditable (ids stables = rang → mêmes ids d'items) */
+function builtinAsEditable(){
+  return {version:1, cats: TEMPLATE.map(cat=>({id:cat.id, label:cat.label, team:cat.team,
+    items: cat.items.map((label,i)=>({id:String(i+1), label,
+      crits: /exigé C1\/C2/.test(label) ? ['C1','C2'] : ['C1','C2','C3','C4']}))}))};
+}
 
 /* ---------- Utilitaires ---------- */
 
@@ -642,6 +673,7 @@ let state = null;
 const ui = {
   q:'', filters:{stage:'',crit:'',status:'',team:''}, sort:'date',
   catOpen:{}, comments:{}, refocus:null, test:{},
+  searchQ:'', audit:{entries:null, limit:300, q:''}, refDraft:null,
 };
 let lastHash = null;
 
@@ -731,8 +763,10 @@ const isAdmin  = () => !serverMode || (me && me.role === 'admin');
 const MUTATING_ACTIONS = new Set(['new-platform','edit-platform','delete-platform','cycle-item',
   'add-item','add-action','del-action','decide','clear-decision','set-stage','next-stage',
   'new-team','edit-team','delete-team','load-demo','reset-demo','wipe-all','import-apply',
-  'restore-backup','make-backup','server-backup','del-dmex','dmex-attach','sync-platform']);
-const ADMIN_CHANGES = new Set(['threshold','int-site','int-label']);
+  'restore-backup','make-backup','server-backup','del-dmex','dmex-attach','sync-platform',
+  'confirm-decision','ref-save','ref-apply','ref-add-cat','ref-del-cat','ref-add-item','ref-del-item',
+  'ref-move','ref-reset','cf-del']);
+const ADMIN_CHANGES = new Set(['threshold','int-site','int-label','gng-validation']);
 
 async function api(path, opts){
   const o = Object.assign({headers:{}}, opts||{});
@@ -757,6 +791,8 @@ const sharedSettings = () => ({
   readyThreshold: state.settings.readyThreshold,
   dmexLabel: state.integrations.dmexLabel,
   siteUrl: state.integrations.siteUrl,
+  gonogoValidation: state.settings.gonogoValidation,
+  customFields: state.settings.customFields,
 });
 const sharedSettingsJson = () => JSON.stringify(sharedSettings());
 
@@ -765,6 +801,8 @@ function applySharedSettings(d){
   state.settings.readyThreshold = parseInt(d.readyThreshold,10) || 90;
   state.integrations.dmexLabel = String(d.dmexLabel||'asset-dip');
   state.integrations.siteUrl = safeUrl(d.siteUrl);
+  state.settings.gonogoValidation = ['off','C1','C1C2','all'].includes(d.gonogoValidation) ? d.gonogoValidation : 'C1C2';
+  state.settings.customFields = Array.isArray(d.customFields) ? d.customFields : [];
 }
 
 async function loadServerState(){
@@ -780,6 +818,13 @@ async function loadServerState(){
   state.platforms.forEach(p=>{ shadow.plat[p.id] = JSON.stringify(p); });
   revs.teams = s.teams.rev;       shadow.teams = JSON.stringify(state.teams);
   revs.settings = s.settings.rev; shadow.settings = sharedSettingsJson();
+  if(s.template && s.template.data && Array.isArray(s.template.data.cats)){
+    serverTemplate = s.template.data;
+    revs.template = s.template.rev;
+  }else{
+    serverTemplate = null;
+    revs.template = 0;
+  }
 }
 
 /* File d'écriture : les modifications partent dans l'ordre, coalescées par cible */
@@ -861,18 +906,22 @@ async function putPlatform(id){
 }
 
 async function putDoc(key){
-  const body = key==='teams'
-    ? {rev:revs.teams, data:state.teams}
+  const body = key==='teams' ? {rev:revs.teams, data:state.teams}
+    : key==='template' ? {rev:revs.template, data:serverTemplate}
     : {rev:revs.settings, data:sharedSettings()};
   try{
     const r = await api('/api/'+key, {method:'PUT', body});
     if(key==='teams'){ revs.teams = r.rev; shadow.teams = JSON.stringify(state.teams); }
+    else if(key==='template'){ revs.template = r.rev; }
     else { revs.settings = r.rev; shadow.settings = sharedSettingsJson(); }
   }catch(e){
     if(e.status===409 && e.body && e.body.current){
       if(key==='teams'){
         state.teams = Array.isArray(e.body.current.data) ? e.body.current.data : [];
         revs.teams = e.body.current.rev; shadow.teams = JSON.stringify(state.teams);
+      }else if(key==='template'){
+        serverTemplate = e.body.current.data; revs.template = e.body.current.rev;
+        ui.refDraft = null;
       }else{
         applySharedSettings(e.body.current.data);
         revs.settings = e.body.current.rev; shadow.settings = sharedSettingsJson();
@@ -881,7 +930,8 @@ async function putDoc(key){
       toast('Réglages modifiés par '+(e.body.current.updatedBy||'un autre utilisateur')+' — version rechargée.', 'crit');
       return;
     }
-    if(key==='teams') shadow.teams = '__dirty__'; else shadow.settings = '__dirty__';
+    if(key==='teams') shadow.teams = '__dirty__';
+    else if(key!=='template') shadow.settings = '__dirty__';
     throw e;
   }
 }
@@ -922,7 +972,8 @@ async function handleServerEvent(ev){
       delete revs.plat[ev.id]; delete shadow.plat[ev.id];
       render();
       toast('Fiche supprimée par '+(ev.by||'un autre utilisateur'));
-    }else if(ev.type === 'teams' || ev.type === 'settings' || ev.type === 'reload'){
+    }else if(ev.type === 'teams' || ev.type === 'settings' || ev.type === 'template' || ev.type === 'reload'){
+      if(ev.type === 'template') ui.refDraft = null; /* le brouillon local est périmé */
       await loadServerState();
       render();
     }
@@ -954,10 +1005,15 @@ const BLANK_SYNC = () => ({at:'', jiraError:'', dmexError:'', partial:false, mor
 function normalizeState(s){
   const str = v => String(v==null?'':v);
   const day = v => ISO_DAY.test(str(v)) ? str(v) : '';
-  s.settings = Object.assign({readyThreshold:90, userName:''}, (s.settings&&typeof s.settings==='object')?s.settings:{});
+  s.settings = Object.assign({readyThreshold:90, userName:'', gonogoValidation:'C1C2', customFields:[]},
+    (s.settings&&typeof s.settings==='object')?s.settings:{});
   let th = parseInt(s.settings.readyThreshold, 10);
   s.settings.readyThreshold = isNaN(th) ? 90 : Math.min(100, Math.max(50, th));
   s.settings.userName = str(s.settings.userName);
+  if(!['off','C1','C1C2','all'].includes(s.settings.gonogoValidation)) s.settings.gonogoValidation = 'C1C2';
+  s.settings.customFields = (Array.isArray(s.settings.customFields)?s.settings.customFields:[])
+    .filter(f=>f && typeof f==='object' && f.label)
+    .map(f=>({id:str(f.id)||uid('cf'), label:str(f.label)}));
   s.integrations = Object.assign({relayUrl:'', siteUrl:'', dmexLabel:'asset-dip', relayToken:''},
     (s.integrations&&typeof s.integrations==='object')?s.integrations:{});
   s.integrations.relayUrl = safeUrl(s.integrations.relayUrl);
@@ -995,10 +1051,18 @@ function normalizeState(s){
     });
     p.journal = (Array.isArray(p.journal)?p.journal:[]).filter(j=>j && typeof j==='object')
       .map(j=>({ts:str(j.ts), text:str(j.text), by:str(j.by)}));
-    p.gonogo = Object.assign({decision:null, date:'', comment:'', decidedBy:''},
+    p.gonogo = Object.assign({decision:null, date:'', comment:'', decidedBy:'', decidedByEmail:'',
+        pending:false, confirmedBy:'', confirmedByEmail:'', confirmedAt:''},
       (p.gonogo&&typeof p.gonogo==='object')?p.gonogo:{});
     if(!['go','go_reserves','nogo'].includes(p.gonogo.decision)) p.gonogo.decision = null;
-    p.gonogo.date = day(p.gonogo.date); p.gonogo.comment = str(p.gonogo.comment); p.gonogo.decidedBy = str(p.gonogo.decidedBy);
+    p.gonogo.date = day(p.gonogo.date); p.gonogo.comment = str(p.gonogo.comment);
+    p.gonogo.decidedBy = str(p.gonogo.decidedBy); p.gonogo.decidedByEmail = str(p.gonogo.decidedByEmail);
+    p.gonogo.pending = !!p.gonogo.pending && !!p.gonogo.decision;
+    p.gonogo.confirmedBy = str(p.gonogo.confirmedBy); p.gonogo.confirmedByEmail = str(p.gonogo.confirmedByEmail);
+    p.gonogo.confirmedAt = str(p.gonogo.confirmedAt);
+    const cust = (p.custom && typeof p.custom==='object') ? p.custom : {};
+    p.custom = {};
+    (s.settings.customFields||[]).forEach(f=>{ if(cust[f.id]!=null && str(cust[f.id])) p.custom[f.id] = str(cust[f.id]); });
 
     p.jiraJql = str(p.jiraJql);
     p.dmexPages = (Array.isArray(p.dmexPages)?p.dmexPages:[]).filter(d=>d && typeof d==='object' && d.id)
@@ -1020,25 +1084,48 @@ function normalizeState(s){
 
 /* ---------- Modèle ---------- */
 
-function newChecklist(){
+function newChecklist(criticality){
   const out=[];
-  TEMPLATE.forEach(cat=>{
-    cat.items.forEach((label,i)=>{
-      out.push({id:cat.id+'.'+(i+1), cat:cat.id, label, status:'todo', team:cat.team, due:'', comment:''});
+  getTemplate().forEach(cat=>{
+    (cat.items||[]).forEach((item,i)=>{
+      const crits = templateItemCrits(item);
+      if(crits && criticality && !crits.includes(criticality)) return;
+      out.push({id:templateItemId(cat,item,i), cat:cat.id, label:templateItemLabel(item),
+                status:'todo', team:cat.team||'', due:'', comment:''});
+    });
+  });
+  return out;
+}
+
+/* Items du référentiel manquants dans la checklist d'une fiche (selon sa criticité) */
+function missingTemplateItems(p){
+  const have = new Set(p.checklist.map(i=>i.id));
+  const out=[];
+  getTemplate().forEach(cat=>{
+    (cat.items||[]).forEach((item,i)=>{
+      const crits = templateItemCrits(item);
+      if(crits && !crits.includes(p.criticality)) return;
+      const iid = templateItemId(cat,item,i);
+      if(!have.has(iid)) out.push({id:iid, cat:cat.id, label:templateItemLabel(item),
+                                   status:'todo', team:cat.team||'', due:'', comment:''});
     });
   });
   return out;
 }
 
 function newPlatform(fields){
-  return Object.assign({
+  const p = Object.assign({
     id:uid('p'), name:'', type:TYPES[0], criticality:'C3',
     owner:'', sponsor:'', targetDate:'', goLiveDate:'', description:'',
-    stage:'cadrage', checklist:newChecklist(), actions:[], journal:[],
-    gonogo:{decision:null, date:'', comment:''},
+    stage:'cadrage', checklist:[], actions:[], journal:[],
+    gonogo:{decision:null, date:'', comment:'', decidedBy:'', decidedByEmail:'',
+            pending:false, confirmedBy:'', confirmedByEmail:'', confirmedAt:''},
+    custom:{},
     jiraJql:'', dmexPages:[], sync:BLANK_SYNC(),
     createdAt:new Date().toISOString(),
   }, fields||{});
+  if(!p.checklist.length) p.checklist = newChecklist(p.criticality);
+  return p;
 }
 
 function logJ(p, text){
@@ -1065,9 +1152,22 @@ const isBlocked = p => openBlocking(p).length>0;
 const isLate = p => !!p.targetDate && stageIdx(p.stage) < stageIdx('mep') && p.targetDate < todayISO();
 const isReady = p => score(p) >= state.settings.readyThreshold && !isBlocked(p) && ['preprod','gonogo'].includes(p.stage);
 
+const GG_LBL = {go:'GO', go_reserves:'GO avec réserves', nogo:'NO-GO'};
+
+/* La contre-validation est-elle exigée pour cette fiche ? (réglage commun, mode serveur) */
+function gonogoNeedsConfirm(p){
+  if(!serverMode) return false;
+  const v = state.settings.gonogoValidation || 'C1C2';
+  if(v==='off') return false;
+  if(v==='all') return true;
+  if(v==='C1') return p.criticality==='C1';
+  return p.criticality==='C1' || p.criticality==='C2';
+}
+
 function platformStatus(p){
   if(p.stage==='run')  return {label:'En exploitation', cls:'good'};
   if(isBlocked(p))     return {label:'Bloquée',         cls:'crit'};
+  if(p.gonogo.pending) return {label:'À contre-valider', cls:'warn'};
   if(isLate(p))        return {label:'En retard',       cls:'warn'};
   if(isReady(p))       return {label:'Prête',           cls:'good'};
   return {label:'En cours', cls:'info'};
@@ -1448,6 +1548,8 @@ const ICONS = {
   note:'<path d="M5 4.5h14v11l-4 4H5v-15zM15 19.5v-4h4"/>',
   arr:'<path d="M5 12h14M13 6l6 6-6 6"/>',
   sync:'<path d="M20 4.5V10h-5.5M4 19.5V14h5.5M19.6 10a8 8 0 0 0-13.9-3.2L4 9M4.4 14a8 8 0 0 0 13.9 3.2L20 15"/>',
+  ref:'<path d="M9.5 6h11M9.5 12h11M9.5 18h11M3 5.5l1.5 1.5L7 4M3 11.5l1.5 1.5L7 10M3 17.5l1.5 1.5L7 16"/>',
+  act:'<path d="M3 12h4l2.5-7 5 14 2.5-7h4"/>',
 };
 const icon = n => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(ICONS[n]||'')+'</svg>';
 
@@ -1541,6 +1643,9 @@ function vDashboard(){
   late.forEach(p=>alerts.push({sev:'warn', pid:p.id, t:'Date cible dépassée', s:p.name+' · cible '+fmtD(p.targetDate)}));
   ps.filter(p=>p.stage==='gonogo' && !p.gonogo.decision).forEach(p=>
     alerts.push({sev:'info', pid:p.id, t:'Revue Go/No-Go à tenir', s:p.name+' · préparation '+score(p)+' %'}));
+  ps.filter(p=>p.gonogo.pending).forEach(p=>
+    alerts.push({sev:'warn', pid:p.id, t:'Décision '+(GG_LBL[p.gonogo.decision]||'')+' à contre-valider',
+      s:p.name+' · proposée par '+(p.gonogo.decidedBy||'?')}));
 
   html += '<div class="card"><div class="card-head"><h2 class="card-title">À traiter</h2>'+
     (alerts.length?'<span class="chip '+(alerts.some(a=>a.sev==='crit')?'crit':'warn')+'">'+alerts.length+'</span>':'')+'</div>';
@@ -1745,6 +1850,7 @@ function vDetail(id){
       meta('Date cible', p.targetDate?fmtD(p.targetDate):'')+
       meta('MEP réelle', p.goLiveDate?fmtD(p.goLiveDate):'')+
       meta('Créée le', fmtDateOfTs(p.createdAt))+
+      state.settings.customFields.filter(f=>p.custom && p.custom[f.id]).map(f=>meta(f.label, p.custom[f.id])).join('')+
     '</div>'+
     (p.description?'<p class="desc">'+esc(p.description)+'</p>':'')+
     '<div class="stepper" role="group" aria-label="Étapes">'+STAGES.map((s,i)=>{
@@ -1761,10 +1867,10 @@ function vDetail(id){
     '<span class="cat-count">'+p.checklist.filter(i=>i.status==='done').length+' / '+p.checklist.length+'</span></div>';
   /* Catégories du référentiel + catégories « fantômes » (items d'un ancien TEMPLATE) :
      rien ne doit être invisible tout en comptant dans le score */
-  const knownCats = new Set(TEMPLATE.map(c=>c.id));
+  const knownCats = new Set(getTemplate().map(c=>c.id));
   const ghostCats = [...new Set(p.checklist.filter(i=>!knownCats.has(i.cat)).map(i=>i.cat))]
     .map(id=>({id, label:'Hors référentiel — '+(id||'sans catégorie'), team:''}));
-  TEMPLATE.concat(ghostCats).forEach(cat=>{
+  getTemplate().concat(ghostCats).forEach(cat=>{
     const stats = catStats(p, cat.id);
     if(!stats.total) return;
     const key = p.id+':'+cat.id;
@@ -1840,7 +1946,7 @@ function vDetail(id){
     '<div class="tiny">'+p.checklist.filter(i=>i.status==='done').length+' faits · '+
       p.checklist.filter(i=>i.status==='progress').length+' en cours · '+
       p.checklist.filter(i=>i.status==='todo').length+' à faire</div></div></div>'+
-    '<div class="gates">'+TEMPLATE.map(cat=>{
+    '<div class="gates">'+getTemplate().map(cat=>{
       const s2 = catStats(p, cat.id);
       if(!s2.total) return '';
       const cls = s2.complete?'ok':(s2.done||s2.prog?'part':'');
@@ -1852,11 +1958,27 @@ function vDetail(id){
   if(blocking.length){
     html += '<p class="gng-warn">'+blocking.length+' action'+(blocking.length>1?'s':'')+' bloquante'+(blocking.length>1?'s':'')+' ouverte'+(blocking.length>1?'s':'')+'.</p>';
   }
-  if(p.gonogo.decision){
-    const lbl = {go:'GO', go_reserves:'GO avec réserves', nogo:'NO-GO'}[p.gonogo.decision];
+  if(p.gonogo.decision && p.gonogo.pending){
+    const lbl = GG_LBL[p.gonogo.decision];
+    const cls = {go:'good', go_reserves:'warn', nogo:'crit'}[p.gonogo.decision];
+    const isProposer = serverMode && me && p.gonogo.decidedByEmail === me.email;
+    html += '<div class="gng-decided">'+
+      '<div>'+chip('En attente de contre-validation','warn')+'</div>'+
+      '<div style="margin-top:6px">'+chip(lbl,cls)+' <span class="d-date">proposée le '+fmtD(p.gonogo.date)+
+      (p.gonogo.decidedBy?' par '+esc(p.gonogo.decidedBy):'')+'</span></div>'+
+      (p.gonogo.comment?'<div class="d-com">'+esc(p.gonogo.comment)+'</div>':'')+
+      '<div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap">'+
+      '<button class="btn btn-s btn-go" data-action="confirm-decision" data-id="'+esc(p.id)+'"'+
+        (isProposer?' disabled title="Le proposeur ne peut pas contre-valider sa propre décision"':'')+'>Contre-valider</button>'+
+      '<button class="btn btn-s btn-ghost" data-action="clear-decision" data-id="'+esc(p.id)+'">Annuler la proposition</button></div>'+
+      (isProposer?'<p class="tiny muted" style="margin-top:6px">Un autre contributeur doit contre-valider votre proposition.</p>':'')+
+      '</div>';
+  } else if(p.gonogo.decision){
+    const lbl = GG_LBL[p.gonogo.decision];
     const cls = {go:'good', go_reserves:'warn', nogo:'crit'}[p.gonogo.decision];
     html += '<div class="gng-decided"><div>'+chip(lbl,cls)+' <span class="d-date">'+fmtD(p.gonogo.date)+
-      (p.gonogo.decidedBy?' · par '+esc(p.gonogo.decidedBy):'')+'</span></div>'+
+      (p.gonogo.decidedBy?' · par '+esc(p.gonogo.decidedBy):'')+
+      (p.gonogo.confirmedBy?' · contre-validée par '+esc(p.gonogo.confirmedBy):'')+'</span></div>'+
       (p.gonogo.comment?'<div class="d-com">'+esc(p.gonogo.comment)+'</div>':'')+
       '<div style="margin-top:8px"><button class="btn btn-s btn-ghost" data-action="clear-decision" data-id="'+esc(p.id)+'">Annuler la décision</button></div></div>';
   } else {
@@ -1865,7 +1987,9 @@ function vDetail(id){
       '<button class="btn btn-go" data-action="decide" data-id="'+esc(p.id)+'" data-d="go">Go</button>'+
       '<button class="btn" data-action="decide" data-id="'+esc(p.id)+'" data-d="go_reserves">Go avec réserves</button>'+
       '<button class="btn btn-nogo" data-action="decide" data-id="'+esc(p.id)+'" data-d="nogo">No-Go</button></div>'+
-      '<p class="tiny muted">Un Go bascule la plateforme à l’étape « Mise en production ».</p>';
+      '<p class="tiny muted">'+(gonogoNeedsConfirm(p)
+        ? 'Criticité '+esc(p.criticality)+' : la décision devra être contre-validée par un autre contributeur avant de prendre effet.'
+        : 'Un Go bascule la plateforme à l’étape « Mise en production ».')+'</p>';
   }
   html += '</div></div>';
 
@@ -2011,10 +2135,18 @@ function vSettings(){
       '<input id="set-name" data-change="user-name" value="'+esc(state.settings.userName)+'" placeholder="Prénom Nom" style="min-width:220px"></div></div>';
   }
 
-  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Seuil de préparation</h2>'+
-    '<div class="set-row"><label for="set-th">Score minimal pour déclarer une plateforme « prête »'+
-    (serverMode?' <span class="muted">(réglage commun'+(isAdmin()?'':' — administrateurs')+')</span>':'')+'</label>'+
-    '<input id="set-th" type="number" min="50" max="100" step="5" value="'+state.settings.readyThreshold+'" data-change="threshold" style="width:90px" class="mono"'+(isAdmin()?'':' disabled')+'> <span class="muted">%</span></div></div>';
+  const commonNote = serverMode ? ' <span class="muted">(réglage commun'+(isAdmin()?'':' — administrateurs')+')</span>' : '';
+  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Gouvernance</h2>'+
+    '<div class="set-row"><label for="set-th">Score minimal pour déclarer une plateforme « prête »'+commonNote+'</label>'+
+    '<input id="set-th" type="number" min="50" max="100" step="5" value="'+state.settings.readyThreshold+'" data-change="threshold" style="width:90px" class="mono"'+(isAdmin()?'':' disabled')+'> <span class="muted">%</span></div>'+
+    (serverMode
+      ? '<div class="set-row"><label for="set-gng">Contre-validation des décisions Go/No-Go (quatre yeux)'+commonNote+'</label>'+
+        '<select id="set-gng" data-change="gng-validation"'+(isAdmin()?'':' disabled')+'>'+
+        [['off','Désactivée'],['C1','C1 uniquement'],['C1C2','C1 et C2'],['all','Toutes les fiches']]
+          .map(o=>'<option value="'+o[0]+'"'+(state.settings.gonogoValidation===o[0]?' selected':'')+'>'+o[1]+'</option>').join('')+
+        '</select></div>'
+      : '')+
+    '</div>';
 
   html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Exporter / importer</h2>'+
     '<p class="tiny muted" style="margin-bottom:10px">'+
@@ -2079,6 +2211,17 @@ function vSettings(){
     fileHint+
   '</div>';
 
+  html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Champs personnalisés des fiches</h2>'+
+    '<p class="tiny muted" style="margin-bottom:8px; max-width:80ch">Champs texte supplémentaires, affichés dans l’en-tête des fiches et saisis dans la modale d’édition (ex. code CMDB, centre de coût)'+(serverMode?' — réglage commun'+(isAdmin()?'':', administrateurs'):'')+'.</p>'+
+    (state.settings.customFields.length
+      ? state.settings.customFields.map(f=>'<div class="set-row"><label>'+esc(f.label)+'</label>'+
+          (isAdmin()?'<button class="btn btn-s" data-action="cf-del" data-cf="'+esc(f.id)+'">Retirer</button>':'')+'</div>').join('')
+      : '<p class="tiny muted">Aucun champ personnalisé.</p>')+
+    (isAdmin()
+      ? '<form class="set-row" data-submit="cf-add" style="margin-top:4px"><input name="label" placeholder="Nom du champ (ex. Code CMDB)" style="min-width:240px" autocomplete="off"><button class="btn btn-s" type="submit">'+icon('plus')+'Ajouter</button></form>'
+      : '')+
+    '</div>';
+
   if(!serverMode || isAdmin()){
     html += '<div class="card card-pad set-sec"><h2 class="card-title" style="margin-bottom:8px">Réinitialisation'+(serverMode?' (référentiel partagé)':'')+'</h2>'+
       '<div class="set-row"><label>Recharger le jeu de démonstration (remplace tout)</label>'+
@@ -2096,15 +2239,185 @@ function vSettings(){
   return html;
 }
 
+/* ---------- Vue : recherche globale ---------- */
+
+function hlSnippet(text, q){
+  const t = String(text||'');
+  const i = t.toLowerCase().indexOf(q.toLowerCase());
+  if(i < 0) return esc(t.slice(0, 90));
+  const pre = t.slice(Math.max(0, i-40), i), m = t.slice(i, i+q.length), post = t.slice(i+q.length, i+q.length+60);
+  return (i>40?'…':'')+esc(pre)+'<mark>'+esc(m)+'</mark>'+esc(post)+((i+q.length+60)<t.length?'…':'');
+}
+
+function searchAll(q){
+  const L = q.toLowerCase(), CAP = 50;
+  const G = [
+    {label:'Plateformes', rows:[], more:false},
+    {label:'Checklist', rows:[], more:false},
+    {label:'Actions & réserves', rows:[], more:false},
+    {label:'Journal', rows:[], more:false},
+    {label:'Tickets Jira', rows:[], more:false},
+    {label:'Pages DMEX', rows:[], more:false},
+  ];
+  const push = (g, pid, title, text)=>{
+    if(g.rows.length >= CAP){ g.more = true; return; }
+    g.rows.push({pid, title, snippet: hlSnippet(text, q)});
+  };
+  state.platforms.forEach(p=>{
+    const hay = [p.name, p.description, p.owner, p.sponsor, p.type].concat(Object.values(p.custom||{}));
+    const hit = hay.find(v=>String(v||'').toLowerCase().includes(L));
+    if(hit != null) push(G[0], p.id, p.name, String(hit));
+    p.checklist.forEach(it=>{
+      if(it.label.toLowerCase().includes(L)) push(G[1], p.id, p.name, it.label);
+      else if((it.comment||'').toLowerCase().includes(L)) push(G[1], p.id, p.name, it.comment);
+    });
+    p.actions.forEach(a=>{ if(a.label.toLowerCase().includes(L)) push(G[2], p.id, p.name, a.label); });
+    p.journal.forEach(j=>{ if((j.text||'').toLowerCase().includes(L)) push(G[3], p.id, p.name, j.text); });
+    (p.sync.issues||[]).forEach(t=>{
+      const s = t.key+' — '+t.summary;
+      if(s.toLowerCase().includes(L)) push(G[4], p.id, p.name, s);
+    });
+    (p.sync.pages||[]).forEach(pg=>{ if((pg.title||'').toLowerCase().includes(L)) push(G[5], p.id, p.name, pg.title); });
+  });
+  return G;
+}
+
+function vSearch(){
+  const q = ui.searchQ.trim();
+  let html = '<div class="topbar"><div><h1>Recherche</h1>'+
+    '<p class="sub">Fiches, checklists, actions, journaux, tickets Jira et pages DMEX · raccourci : touche <span class="mono">/</span></p></div></div>';
+  html += '<div class="filters"><div class="field" style="flex:1; max-width:520px"><label for="gsearch">Recherche globale</label>'+
+    '<span class="search-box">'+icon('search')+
+    '<input id="gsearch" type="search" data-input="gsearch" value="'+esc(ui.searchQ)+'" placeholder="Au moins 2 caractères…" style="width:100%" autocomplete="off"></span></div></div>';
+  if(q.length < 2) return html + '<div class="card"><p class="empty-note">Saisissez au moins deux caractères — la recherche parcourt tout le contenu des fiches.</p></div>';
+  const groups = searchAll(q);
+  const total = groups.reduce((n,g)=>n+g.rows.length, 0);
+  if(!total) return html + '<div class="card"><p class="empty-note">Aucun résultat pour « '+esc(q)+' ».</p></div>';
+  groups.forEach(g=>{
+    if(!g.rows.length) return;
+    html += '<div class="card" style="margin-bottom:14px"><div class="card-head"><h2 class="card-title">'+esc(g.label)+'</h2>'+
+      '<span class="chip na">'+g.rows.length+(g.more?'+':'')+'</span></div><div class="rows">'+
+      g.rows.map(r=>'<div class="row-item" data-nav="#/plateforme/'+esc(r.pid)+'">'+
+        '<div class="row-main"><div class="row-title">'+esc(r.title)+'</div>'+
+        '<div class="row-sub">'+r.snippet+'</div></div>'+icon('chev')+'</div>').join('')+
+      '</div></div>';
+  });
+  return html;
+}
+
+/* ---------- Vue : activité (audit serveur) ---------- */
+
+async function loadAudit(){
+  try{
+    const r = await api('/api/audit?limit='+ui.audit.limit);
+    ui.audit.entries = r.entries || [];
+  }catch(e){
+    ui.audit.entries = [];
+    toast('Audit : '+e.message, 'crit');
+  }
+  if(route().view === 'audit') render();
+}
+
+function vAudit(){
+  let html = '<div class="topbar"><div><h1>Activité</h1>'+
+    '<p class="sub">Journal d’audit du référentiel partagé — tracé côté serveur, infalsifiable depuis le navigateur</p></div>'+
+    '<div class="topbar-actions"><button class="btn" data-action="audit-reload">'+icon('sync')+'Actualiser</button></div></div>';
+  if(!serverMode) return html + '<div class="card"><p class="empty-note">Disponible en mode référentiel partagé uniquement.</p></div>';
+  if(ui.audit.entries === null){
+    loadAudit();
+    return html + '<div class="card"><p class="empty-note">Chargement…</p></div>';
+  }
+  const q = ui.audit.q.trim().toLowerCase();
+  const rows = ui.audit.entries.filter(e=>!q ||
+    (e.user+' '+e.action+' '+(e.name||'')+' '+(e.target||'')).toLowerCase().includes(q));
+  html += '<div class="filters"><div class="field"><label for="audit-q">Filtre</label>'+
+    '<span class="search-box">'+icon('search')+
+    '<input id="audit-q" type="search" data-input="audit-q" value="'+esc(ui.audit.q)+'" placeholder="Utilisateur, action, fiche…" autocomplete="off"></span></div>'+
+    '<div class="field"><label>&nbsp;</label><span class="tiny muted">'+rows.length+' / '+ui.audit.entries.length+' entrées</span></div>'+
+    (ui.audit.entries.length >= ui.audit.limit && ui.audit.limit < 1000
+      ? '<div class="field"><label>&nbsp;</label><button class="btn btn-s" data-action="audit-more">Charger plus (1000)</button></div>' : '')+
+    '</div>';
+  const CLS = {'création':'good','modification':'info','suppression':'crit','import':'warn'};
+  html += '<div class="table-wrap"><table class="plist" style="min-width:640px"><thead><tr>'+
+    '<th>Quand</th><th>Qui</th><th>Action</th><th>Objet</th><th>Rév.</th></tr></thead><tbody>'+
+    (rows.length ? rows.map(e=>{
+      const plat = e.target ? state.platforms.find(p=>p.id===e.target) : null;
+      return '<tr'+(plat?' data-nav="#/plateforme/'+esc(plat.id)+'"':' style="cursor:default"')+'>'+
+        '<td class="mono tiny" style="white-space:nowrap">'+esc(fmtTs(e.ts))+'</td>'+
+        '<td class="tiny">'+esc(e.user)+'</td>'+
+        '<td>'+chip(e.action, CLS[e.action]||'na')+'</td>'+
+        '<td>'+esc(e.name || e.target || '—')+'</td>'+
+        '<td class="mono tiny">'+(e.rev!=null && e.rev!=='' ? esc(e.rev) : '')+'</td></tr>';
+    }).join('') : '<tr><td colspan="5"><p class="empty-note">Aucune entrée.</p></td></tr>')+
+  '</tbody></table></div>';
+  return html;
+}
+
+/* ---------- Vue : référentiel de checklist (administrable) ---------- */
+
+const CRITS = ['C1','C2','C3','C4'];
+
+function vRef(){
+  let html = '<div class="topbar"><div><h1>Référentiel</h1>'+
+    '<p class="sub">Le modèle de checklist d’exploitabilité des nouvelles fiches, par criticité</p></div></div>';
+  if(!serverMode){
+    return html + '<div class="card card-pad"><p class="muted" style="max-width:70ch">En mode local, le référentiel est intégré à l’application (constante <span class="mono">TEMPLATE</span> d’index.html). L’édition en ligne, le versionnage et l’application aux fiches en cours sont disponibles en mode référentiel partagé.</p></div>';
+  }
+  if(!ui.refDraft) ui.refDraft = JSON.parse(JSON.stringify(serverTemplate || builtinAsEditable()));
+  const d = ui.refDraft;
+  const adm = isAdmin();
+  const dis = adm ? '' : ' disabled';
+  html += '<div class="filters" style="align-items:center">'+
+    chip('version '+(serverTemplate ? serverTemplate.version : '—'), 'stage')+
+    (serverTemplate ? '' : chip('référentiel intégré, jamais enregistré', 'na'))+
+    (adm ? '' : chip('lecture seule — administrateurs', 'na'))+
+    '<span style="flex:1"></span>'+
+    (adm ? '<button class="btn" data-action="ref-reset">Repartir du modèle intégré</button>'+
+           '<button class="btn" data-action="ref-apply" title="Ajoute les éléments manquants aux fiches en cours">Appliquer aux fiches en cours</button>'+
+           '<button class="btn btn-primary" data-action="ref-save">Enregistrer le référentiel</button>' : '')+
+    '</div>';
+  d.cats.forEach((cat, ci)=>{
+    html += '<div class="card" style="margin-bottom:12px"><div class="card-pad" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding-bottom:8px">'+
+      '<input value="'+esc(cat.label)+'" data-change="ref-cat-label" data-ci="'+ci+'" style="font-weight:600; flex:1; min-width:220px"'+dis+'>'+
+      '<select class="sel-s" style="width:auto; min-width:160px" data-change="ref-cat-team" data-ci="'+ci+'" aria-label="Équipe par défaut"'+dis+'>'+teamOptions(cat.team)+'</select>'+
+      (adm ? '<button class="icon-btn" data-action="ref-move" data-ci="'+ci+'" data-dir="-1" title="Monter">↑</button>'+
+             '<button class="icon-btn" data-action="ref-move" data-ci="'+ci+'" data-dir="1" title="Descendre">↓</button>'+
+             '<button class="icon-btn" data-action="ref-del-cat" data-ci="'+ci+'" title="Supprimer la catégorie">'+icon('trash')+'</button>' : '')+
+      '</div>';
+    (cat.items||[]).forEach((it, ii)=>{
+      html += '<div class="ref-row">'+
+        '<input value="'+esc(it.label)+'" data-change="ref-item-label" data-ci="'+ci+'" data-ii="'+ii+'" placeholder="Intitulé de l’élément…"'+dis+'>'+
+        '<span class="ref-crits">'+CRITS.map(c=>'<label><input type="checkbox" data-change="ref-item-crit" data-ci="'+ci+'" data-ii="'+ii+'" data-c="'+c+'"'+((it.crits||[]).includes(c)?' checked':'')+dis+'>'+c+'</label>').join('')+'</span>'+
+        (adm ? '<button class="icon-btn" data-action="ref-move" data-ci="'+ci+'" data-ii="'+ii+'" data-dir="-1" title="Monter">↑</button>'+
+               '<button class="icon-btn" data-action="ref-move" data-ci="'+ci+'" data-ii="'+ii+'" data-dir="1" title="Descendre">↓</button>'+
+               '<button class="icon-btn" data-action="ref-del-item" data-ci="'+ci+'" data-ii="'+ii+'" title="Retirer">'+icon('trash')+'</button>' : '')+
+        '</div>';
+    });
+    if(adm) html += '<div class="cat-foot" style="padding:6px 18px 12px"><button class="btn btn-s btn-ghost" data-action="ref-add-item" data-ci="'+ci+'">'+icon('plus')+'Ajouter un élément</button></div>';
+    html += '</div>';
+  });
+  if(adm) html += '<button class="btn" data-action="ref-add-cat">'+icon('plus')+'Nouvelle catégorie</button>';
+  html += '<p class="tiny muted" style="margin-top:12px; max-width:80ch">Les criticités cochées déterminent quelles fiches reçoivent l’élément à leur création (et lors d’un changement de criticité). « Appliquer aux fiches en cours » ajoute les éléments manquants aux fiches hors exploitation ; les éléments retirés du référentiel restent visibles sur les fiches sous « Hors référentiel ».</p>';
+  return html;
+}
+
 /* ---------- Navigation & rendu ---------- */
 
-const NAV = [
-  {hash:'#/tableau-de-bord', label:'Tableau de bord', ic:'dash'},
-  {hash:'#/plateformes',     label:'Plateformes',     ic:'list'},
-  {hash:'#/pipeline',        label:'Pipeline',        ic:'kanban'},
-  {hash:'#/equipes',         label:'Équipes',         ic:'users'},
-  {hash:'#/parametres',      label:'Paramètres',      ic:'gear'},
-];
+function navItems(){
+  const items = [
+    {hash:'#/tableau-de-bord', label:'Tableau de bord', ic:'dash'},
+    {hash:'#/plateformes',     label:'Plateformes',     ic:'list'},
+    {hash:'#/pipeline',        label:'Pipeline',        ic:'kanban'},
+    {hash:'#/recherche',       label:'Recherche',       ic:'search'},
+    {hash:'#/equipes',         label:'Équipes',         ic:'users'},
+  ];
+  if(serverMode){
+    items.push({hash:'#/activite',    label:'Activité',    ic:'act'});
+    items.push({hash:'#/referentiel', label:'Référentiel', ic:'ref'});
+  }
+  items.push({hash:'#/parametres', label:'Paramètres', ic:'gear'});
+  return items;
+}
 
 function route(){
   const h = location.hash || '#/tableau-de-bord';
@@ -2114,14 +2427,16 @@ function route(){
     try{ id = decodeURIComponent(id); }catch(e){}
     return {view:'detail', id};
   }
-  const map = {'#/tableau-de-bord':'dashboard','#/plateformes':'list','#/pipeline':'kanban','#/equipes':'teams','#/parametres':'settings'};
+  const map = {'#/tableau-de-bord':'dashboard','#/plateformes':'list','#/pipeline':'kanban','#/equipes':'teams',
+               '#/parametres':'settings','#/recherche':'search','#/activite':'audit','#/referentiel':'ref'};
   return {view: map[h] || 'dashboard'};
 }
 
 function render(){
   const r = route();
-  const activeHash = {'dashboard':'#/tableau-de-bord','list':'#/plateformes','kanban':'#/pipeline','teams':'#/equipes','settings':'#/parametres','detail':'#/plateformes'}[r.view];
-  $('#nav').innerHTML = NAV.map(n=>'<a class="nav-a'+(n.hash===activeHash?' active':'')+'" href="'+n.hash+'">'+icon(n.ic)+esc(n.label)+'</a>').join('');
+  const activeHash = {'dashboard':'#/tableau-de-bord','list':'#/plateformes','kanban':'#/pipeline','teams':'#/equipes',
+    'settings':'#/parametres','detail':'#/plateformes','search':'#/recherche','audit':'#/activite','ref':'#/referentiel'}[r.view];
+  $('#nav').innerHTML = navItems().map(n=>'<a class="nav-a'+(n.hash===activeHash?' active':'')+'" href="'+n.hash+'">'+icon(n.ic)+esc(n.label)+'</a>').join('');
   $('#side-foot').innerHTML =
     (serverMode && me ? '<strong>'+esc(me.name)+'</strong> · '+esc(me.role)+'<br>' : '')+
     state.platforms.length+' plateforme'+(state.platforms.length>1?'s':'')+' · '+state.platforms.filter(p=>p.stage!=='run').length+' active'+(state.platforms.filter(p=>p.stage!=='run').length>1?'s':'')+
@@ -2142,7 +2457,8 @@ function render(){
     }
   });
 
-  const views = {dashboard:vDashboard, list:vList, kanban:vKanban, teams:vTeams, settings:vSettings};
+  const views = {dashboard:vDashboard, list:vList, kanban:vKanban, teams:vTeams, settings:vSettings,
+                 search:vSearch, audit:vAudit, ref:vRef};
   $('#view').innerHTML = r.view==='detail' ? vDetail(r.id) : views[r.view]();
   if(sameRoute) window.scrollTo(0,y); else window.scrollTo(0,0);
 
@@ -2208,9 +2524,21 @@ function setStage(p, stage){
 
 function decide(p, d){
   const comEl = $('#gng-comment');
-  p.gonogo = {decision:d, date:todayISO(), comment: comEl ? comEl.value.trim() : '', decidedBy: state.settings.userName||''};
-  const lbl = {go:'GO', go_reserves:'GO avec réserves', nogo:'NO-GO'}[d];
-  logJ(p, 'Décision '+lbl+' prononcée'+(p.gonogo.comment?' — '+p.gonogo.comment:'.'));
+  const comment = comEl ? comEl.value.trim() : '';
+  const who = state.settings.userName||'';
+  const mail = (serverMode && me) ? me.email : '';
+  const lbl = GG_LBL[d];
+  if(gonogoNeedsConfirm(p)){
+    p.gonogo = {decision:d, date:todayISO(), comment, decidedBy:who, decidedByEmail:mail,
+                pending:true, confirmedBy:'', confirmedByEmail:'', confirmedAt:''};
+    logJ(p, 'Décision '+lbl+' proposée — en attente de contre-validation par un autre contributeur.');
+    saveState(); render();
+    toast('Décision '+lbl+' proposée : contre-validation requise ('+p.criticality+')');
+    return;
+  }
+  p.gonogo = {decision:d, date:todayISO(), comment, decidedBy:who, decidedByEmail:mail,
+              pending:false, confirmedBy:'', confirmedByEmail:'', confirmedAt:''};
+  logJ(p, 'Décision '+lbl+' prononcée'+(comment?' — '+comment:'.'));
   if(d!=='nogo' && stageIdx(p.stage)<stageIdx('mep')){
     p.stage='mep';
     if(!p.goLiveDate) p.goLiveDate = todayISO();
@@ -2218,6 +2546,28 @@ function decide(p, d){
   }
   saveState(); render();
   toast('Décision enregistrée : '+lbl, d==='nogo'?'crit':'good');
+}
+
+function confirmDecision(p){
+  const gg = p.gonogo;
+  if(!gg.pending) return;
+  if(serverMode && me && gg.decidedByEmail === me.email){
+    toast('Vous avez proposé cette décision : un autre contributeur doit la contre-valider.','crit');
+    return;
+  }
+  gg.pending = false;
+  gg.confirmedBy = state.settings.userName||'';
+  gg.confirmedByEmail = (serverMode && me) ? me.email : '';
+  gg.confirmedAt = new Date().toISOString();
+  const lbl = GG_LBL[gg.decision];
+  logJ(p, 'Décision '+lbl+' contre-validée.');
+  if(gg.decision!=='nogo' && stageIdx(p.stage)<stageIdx('mep')){
+    p.stage='mep';
+    if(!p.goLiveDate) p.goLiveDate = todayISO();
+    logJ(p, 'Passage à l’étape « Mise en production ».');
+  }
+  saveState(); render();
+  toast('Décision contre-validée : '+lbl, gg.decision==='nogo'?'crit':'good');
 }
 
 /* ---------- Modales ---------- */
@@ -2243,6 +2593,8 @@ function platformModal(p){
     '<div class="f-field"><label for="fp-date">Date cible de MEP</label><input id="fp-date" name="targetDate" type="date" value="'+esc(v.targetDate)+'"></div>'+
     '<div class="f-field"><label for="fp-golive">Date de MEP réelle</label><input id="fp-golive" name="goLiveDate" type="date" value="'+esc(v.goLiveDate)+'"></div>'+
     '<div class="f-field full"><label for="fp-desc">Description</label><textarea id="fp-desc" name="description" placeholder="Objet de la plateforme, périmètre, environnements…">'+esc(v.description)+'</textarea></div>'+
+    state.settings.customFields.map(f=>'<div class="f-field"><label for="fp-cf-'+esc(f.id)+'">'+esc(f.label)+'</label>'+
+      '<input id="fp-cf-'+esc(f.id)+'" name="cf_'+esc(f.id)+'" value="'+esc((v.custom&&v.custom[f.id])||'')+'"></div>').join('')+
     '</div><div class="m-foot">'+
     (isNew?'':'<button type="button" class="btn btn-danger" data-action="delete-platform" data-id="'+esc(v.id)+'">'+icon('trash')+'Supprimer</button>')+
     '<div class="right"><button type="button" class="btn btn-ghost" data-action="close-modal">Annuler</button>'+
@@ -2440,9 +2792,15 @@ document.addEventListener('click', e=>{
       saveState(); render(); return;
     }
     if(a==='decide' && p){ decide(p, actEl.dataset.d); return; }
+    if(a==='confirm-decision' && p){ confirmDecision(p); return; }
     if(a==='clear-decision' && p){
-      logJ(p, 'Décision '+({go:'GO',go_reserves:'GO avec réserves',nogo:'NO-GO'}[p.gonogo.decision]||'')+' annulée.');
-      p.gonogo = {decision:null, date:'', comment:''};
+      if(p.gonogo.pending && serverMode && me && p.gonogo.decidedByEmail !== me.email && !isAdmin()){
+        toast('Seul le proposeur (ou un administrateur) peut annuler cette proposition.','crit');
+        return;
+      }
+      logJ(p, 'Décision '+(GG_LBL[p.gonogo.decision]||'')+(p.gonogo.pending?' (proposition)':'')+' annulée.');
+      p.gonogo = {decision:null, date:'', comment:'', decidedBy:'', decidedByEmail:'',
+                  pending:false, confirmedBy:'', confirmedByEmail:'', confirmedAt:''};
       saveState(); render(); return;
     }
     if(a==='set-stage' && p){ setStage(p, actEl.dataset.stage); return; }
@@ -2557,6 +2915,74 @@ document.addEventListener('click', e=>{
         .catch(e=>toast('Échec : '+e.message,'crit'));
       return;
     }
+    if(a==='audit-reload'){ ui.audit.entries = null; render(); return; }
+    if(a==='audit-more'){ ui.audit.limit = 1000; ui.audit.entries = null; render(); return; }
+
+    /* Référentiel (brouillon local, enregistrement explicite) */
+    if(a.startsWith('ref-')){
+      if(!isAdmin()){ toast('Réservé aux administrateurs.','crit'); return; }
+      const d = ui.refDraft;
+      if(a==='ref-reset'){
+        if(confirm('Repartir du modèle intégré ? Le brouillon en cours est remplacé (rien n’est enregistré tant que vous ne cliquez pas sur Enregistrer).')){
+          ui.refDraft = builtinAsEditable(); render();
+        }
+        return;
+      }
+      if(!d) return;
+      const ci = parseInt(actEl.dataset.ci, 10);
+      const ii = actEl.dataset.ii !== undefined ? parseInt(actEl.dataset.ii, 10) : null;
+      if(a==='ref-add-cat'){ d.cats.push({id:uid('cat'), label:'Nouvelle catégorie', team:'', items:[]}); render(); return; }
+      if(a==='ref-add-item'){ if(d.cats[ci]){ d.cats[ci].items.push({id:uid(''), label:'', crits:CRITS.slice()}); render(); } return; }
+      if(a==='ref-del-cat'){
+        if(d.cats[ci] && confirm('Supprimer la catégorie « '+d.cats[ci].label+' » du référentiel ? (les fiches existantes gardent leurs éléments, sous « Hors référentiel »)')){
+          d.cats.splice(ci,1); render();
+        }
+        return;
+      }
+      if(a==='ref-del-item'){ if(d.cats[ci]){ d.cats[ci].items.splice(ii,1); render(); } return; }
+      if(a==='ref-move'){
+        const dir = parseInt(actEl.dataset.dir, 10);
+        const arr = ii===null ? d.cats : (d.cats[ci]||{}).items;
+        const from = ii===null ? ci : ii, to = from + dir;
+        if(arr && to>=0 && to<arr.length){ const [x]=arr.splice(from,1); arr.splice(to,0,x); render(); }
+        return;
+      }
+      if(a==='ref-save'){
+        d.cats = d.cats.filter(c=>String(c.label||'').trim());
+        d.cats.forEach(c=>{ c.items = (c.items||[]).filter(it=>String(it.label||'').trim()); });
+        d.version = (serverTemplate && serverTemplate.version ? serverTemplate.version : 0) + 1;
+        serverTemplate = JSON.parse(JSON.stringify(d));
+        queuePush(()=>putDoc('template'));
+        render(); toast('Référentiel v'+d.version+' enregistré — il s’applique aux nouvelles fiches','good');
+        return;
+      }
+      if(a==='ref-apply'){
+        if(!serverTemplate){ toast('Enregistrez d’abord le référentiel.','crit'); return; }
+        if(!confirm('Ajouter les éléments manquants du référentiel v'+serverTemplate.version+' à toutes les fiches en cours (hors exploitation), selon leur criticité ?')) return;
+        let nf=0, ni=0;
+        state.platforms.forEach(pp=>{
+          if(pp.stage==='run') return;
+          const miss = missingTemplateItems(pp);
+          if(miss.length){
+            pp.checklist.push(...miss);
+            logJ(pp, 'Référentiel v'+serverTemplate.version+' appliqué : '+miss.length+' élément(s) ajouté(s).');
+            nf++; ni += miss.length;
+          }
+        });
+        if(nf){ saveState(); render(); toast(ni+' élément(s) ajouté(s) sur '+nf+' fiche(s)','good'); }
+        else toast('Toutes les fiches en cours sont déjà à jour.');
+        return;
+      }
+      return;
+    }
+    if(a==='cf-del'){
+      if(!isAdmin()){ toast('Réservé aux administrateurs.','crit'); return; }
+      const id = actEl.dataset.cf;
+      state.settings.customFields = state.settings.customFields.filter(f=>f.id!==id);
+      state.platforms.forEach(pp=>{ if(pp.custom) delete pp.custom[id]; });
+      saveState(); render(); toast('Champ retiré');
+      return;
+    }
     if(a==='restore-backup'){
       const slot = parseInt(actEl.dataset.slot, 10);
       if(slot && confirm('Restaurer cette sauvegarde ? L’état actuel sera d’abord sauvegardé.')) restoreBackup(slot);
@@ -2593,15 +3019,33 @@ document.addEventListener('submit', e=>{
     if(f.dataset.id){
       const p = state.platforms.find(x=>x.id===f.dataset.id);
       if(!p) return;
+      const oldCrit = p.criticality;
       Object.assign(p, {name:val('name'), type:val('type'), criticality:val('criticality'),
         owner:val('owner'), sponsor:val('sponsor'), targetDate:val('targetDate'),
         goLiveDate:val('goLiveDate'), description:val('description')});
+      p.custom = p.custom || {};
+      state.settings.customFields.forEach(cf=>{
+        const v2 = val('cf_'+cf.id);
+        if(v2) p.custom[cf.id] = v2; else delete p.custom[cf.id];
+      });
       logJ(p, 'Fiche modifiée.');
+      if(p.criticality !== oldCrit){
+        const miss = missingTemplateItems(p);
+        if(miss.length){
+          p.checklist.push(...miss);
+          logJ(p, 'Criticité '+oldCrit+' → '+p.criticality+' : '+miss.length+' élément(s) de checklist ajouté(s) (référentiel).');
+          toast(miss.length+' élément(s) ajouté(s) à la checklist (criticité '+p.criticality+')');
+        }
+      }
       closeModal(); saveState(); render(); toast('Modifications enregistrées','good');
     }else{
       const p = newPlatform({name:val('name'), type:val('type'), criticality:val('criticality'),
         owner:val('owner'), sponsor:val('sponsor'), targetDate:val('targetDate'),
         goLiveDate:val('goLiveDate'), description:val('description')});
+      state.settings.customFields.forEach(cf=>{
+        const v2 = val('cf_'+cf.id);
+        if(v2) p.custom[cf.id] = v2;
+      });
       logJ(p, 'Fiche créée.');
       state.platforms.push(p);
       state.seeded = false; /* données réelles présentes : le bandeau démo disparaît */
@@ -2657,6 +3101,13 @@ document.addEventListener('submit', e=>{
     const p = state.platforms.find(x=>x.id===f.dataset.id);
     if(p) runDmexSearch(p, val('q'));
   }
+  if(kind==='cf-add'){
+    if(!isAdmin()){ toast('Réservé aux administrateurs.','crit'); return; }
+    const label = val('label');
+    if(!label) return;
+    state.settings.customFields.push({id:uid('cf'), label});
+    saveState(); render(); toast('Champ « '+label+' » ajouté');
+  }
 });
 
 document.addEventListener('change', e=>{
@@ -2665,7 +3116,35 @@ document.addEventListener('change', e=>{
   const k = el.dataset.change;
   if(k!=='filter' && k!=='sort'){
     if(!canWrite()){ toast('Lecture seule : votre rôle ne permet pas de modifier.','crit'); render(); return; }
-    if(serverMode && ADMIN_CHANGES.has(k) && !isAdmin()){ toast('Réglage commun : réservé aux administrateurs.','crit'); render(); return; }
+    if(serverMode && (ADMIN_CHANGES.has(k) || k.startsWith('ref-')) && !isAdmin()){ toast('Réglage commun : réservé aux administrateurs.','crit'); render(); return; }
+  }
+
+  /* Édition du brouillon de référentiel (aucun enregistrement avant « Enregistrer ») */
+  if(k.startsWith('ref-')){
+    const d = ui.refDraft;
+    if(!d) return;
+    const cat = d.cats[parseInt(el.dataset.ci, 10)];
+    if(!cat) return;
+    if(k==='ref-cat-label'){ cat.label = el.value; return; }
+    if(k==='ref-cat-team'){ cat.team = el.value; return; }
+    const it = cat.items[parseInt(el.dataset.ii, 10)];
+    if(!it) return;
+    if(k==='ref-item-label'){ it.label = el.value; return; }
+    if(k==='ref-item-crit'){
+      const c = el.dataset.c;
+      it.crits = Array.isArray(it.crits) ? it.crits : [];
+      if(el.checked){ if(!it.crits.includes(c)) it.crits.push(c); }
+      else it.crits = it.crits.filter(x=>x!==c);
+      it.crits.sort();
+      return;
+    }
+    return;
+  }
+  if(k==='gng-validation'){
+    state.settings.gonogoValidation = ['off','C1','C1C2','all'].includes(el.value) ? el.value : 'C1C2';
+    saveState(); render();
+    toast('Contre-validation Go/No-Go : '+({off:'désactivée',C1:'C1',C1C2:'C1 et C2',all:'toutes les fiches'}[state.settings.gonogoValidation]));
+    return;
   }
   const p = el.dataset.id ? state.platforms.find(x=>x.id===el.dataset.id) : null;
 
@@ -2709,12 +3188,31 @@ document.addEventListener('change', e=>{
 });
 
 /* Recherche : rendu à la saisie, focus conservé */
+let gsTimer = 0;
 document.addEventListener('input', e=>{
-  const el = e.target.closest('[data-input="search"]');
-  if(!el) return;
-  ui.q = el.value;
-  ui.refocus = {sel:'#f-search'};
-  render();
+  const s = e.target.closest('[data-input="search"]');
+  if(s){ ui.q = s.value; ui.refocus = {sel:'#f-search'}; render(); return; }
+  const g = e.target.closest('[data-input="gsearch"]');
+  if(g){
+    clearTimeout(gsTimer);
+    const v = g.value;
+    gsTimer = setTimeout(()=>{ ui.searchQ = v; ui.refocus = {sel:'#gsearch'}; render(); }, 150);
+    return;
+  }
+  const aq = e.target.closest('[data-input="audit-q"]');
+  if(aq){ ui.audit.q = aq.value; ui.refocus = {sel:'#audit-q'}; render(); return; }
+});
+
+/* Raccourci « / » : recherche globale */
+document.addEventListener('keydown', e=>{
+  if(e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if(t && (t.tagName==='INPUT' || t.tagName==='TEXTAREA' || t.tagName==='SELECT' || t.isContentEditable)) return;
+  if($('#modal-root').firstChild) return;
+  e.preventDefault();
+  ui.refocus = {sel:'#gsearch'};
+  if(location.hash === '#/recherche') render();
+  else location.hash = '#/recherche';
 });
 
 /* Import par fichier */
