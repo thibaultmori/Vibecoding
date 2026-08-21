@@ -36,14 +36,17 @@ import base64
 import email.utils
 import glob
 import gzip
+import hmac
 import json
 import os
 import queue
+import re
 import shutil
 import smtplib
 import socket
 import sqlite3
 import ssl
+import statistics
 import sys
 import threading
 import time
@@ -52,11 +55,11 @@ import urllib.request
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import relay  # liste blanche Atlassian, en-têtes relayés, opener sans redirection
 
-VERSION = '2.1.0'
+VERSION = '2.2.0'
 MAX_DOC = 512 * 1024          # taille maximale d'une fiche (JSON)
 MAX_IMPORT = 20 * 1024 * 1024  # taille maximale d'un import complet
 ROLES = ('admin', 'contributeur', 'lecteur')
@@ -86,6 +89,8 @@ def load_conf(args):
         writers={e.strip().lower() for e in env('WRITE_EMAILS', '').split(',') if e.strip()},
         atl_site=env('ATL_SITE', '').rstrip('/'),
         atl_auth='',
+        atl_sync_minutes=max(0, int(env('ATL_SYNC_MINUTES', '30') or 30)),
+        api_tokens={t.strip() for t in env('API_TOKENS', '').split(',') if t.strip()},
         backup_keep=max(1, int(env('BACKUP_KEEP', '14') or 14)),
         notify=dict(
             smtp_host=env('SMTP_HOST', ''),
@@ -138,11 +143,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS audit(
           seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, user TEXT NOT NULL,
           action TEXT NOT NULL, target TEXT, name TEXT, rev INTEGER);
+        CREATE TABLE IF NOT EXISTS events(
+          seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, platform_id TEXT NOT NULL,
+          name TEXT, kind TEXT NOT NULL, detail TEXT);
         ''')
         defaults = (
             ('teams', '[]'),
             ('settings', json.dumps({'readyThreshold': 90, 'dmexLabel': 'asset-dip', 'siteUrl': '',
-                                     'gonogoValidation': 'C1C2', 'customFields': []})),
+                                     'gonogoValidation': 'C1C2', 'customFields': [],
+                                     'jiraProject': '', 'jiraIssueType': 'Task'})),
         )
         for key, val in defaults:
             c.execute('INSERT OR IGNORE INTO docs(key,rev,json,updated_at,updated_by) VALUES(?,1,?,?,?)',
@@ -154,6 +163,16 @@ def audit(user, action, target='', name='', rev=None):
         with db() as c:
             c.execute('INSERT INTO audit(ts,user,action,target,name,rev) VALUES(?,?,?,?,?,?)',
                       (now(), user, action, target, name, rev))
+    except sqlite3.Error:
+        pass
+
+
+def record_event(platform_id, name, kind, detail=''):
+    """Historique de pilotage : créations, transitions d'étape, décisions, suppressions."""
+    try:
+        with db() as c:
+            c.execute('INSERT INTO events(ts,platform_id,name,kind,detail) VALUES(?,?,?,?,?)',
+                      (now(), platform_id, name, kind, detail))
     except sqlite3.Error:
         pass
 
@@ -502,6 +521,387 @@ def notify_loop():
         time.sleep(300)
 
 
+# ---------- Client Atlassian sortant (synchro automatique + création de tickets) ----------
+
+FIX_TZ = re.compile(r'([+-]\d{2})(\d{2})$')
+
+
+def atl_call(method, path_and_query, body=None):
+    """Appel Atlassian authentifié depuis le serveur. Lève HTTPError/OSError."""
+    url = CONF['atl_site'] + path_and_query
+    data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
+    headers = {'Authorization': CONF['atl_auth'], 'Accept': 'application/json',
+               'User-Agent': 'Passerelle/' + VERSION}
+    if data is not None:
+        headers['Content-Type'] = 'application/json'
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    with relay.OPENER.open(req, timeout=20) as up:
+        raw = up.read(relay.MAX_BODY)
+        return up.status, (json.loads(raw) if raw.strip() else {})
+
+
+def atl_err_text(e):
+    """Message lisible depuis un ErrorCollection Jira/Confluence."""
+    try:
+        b = json.loads(e.read(65536))
+        msgs = [str(m) for m in (b.get('errorMessages') or [])]
+        msgs += ['%s : %s' % (k, v) for k, v in (b.get('errors') or {}).items()]
+        return ' ; '.join(msgs) or ('HTTP %d' % e.code)
+    except Exception:
+        return 'HTTP %d' % e.code
+
+
+def atl_sync_platform(p, site):
+    """Recalcule p['sync'] (même forme que le front). None si rien à synchroniser."""
+    jql = str(p.get('jiraJql') or '').strip()
+    pages = [d for d in (p.get('dmexPages') or []) if isinstance(d, dict) and d.get('id')]
+    if not jql and not pages:
+        return None
+    old = p.get('sync') if isinstance(p.get('sync'), dict) else {}
+    sync = {'at': now(), 'jiraError': '', 'dmexError': '', 'partial': False,
+            'more': bool(old.get('more')), 'issues': old.get('issues') or [], 'pages': old.get('pages') or []}
+    if jql:
+        try:
+            q = ('jql=' + quote(jql) +
+                 '&fields=summary,status,assignee,issuetype,priority,updated&maxResults=50')
+            _, data = atl_call('GET', '/rest/api/3/search/jql?' + q)
+            issues = []
+            for it in data.get('issues') or []:
+                f = it.get('fields') or {}
+                st = f.get('status') or {}
+                issues.append({
+                    'key': it.get('key', ''), 'summary': f.get('summary') or '',
+                    'type': (f.get('issuetype') or {}).get('name') or '',
+                    'status': st.get('name') or '',
+                    'statusCat': (st.get('statusCategory') or {}).get('key') or 'new',
+                    'assignee': (f.get('assignee') or {}).get('displayName') or '',
+                    'priority': (f.get('priority') or {}).get('name') or '',
+                    'updated': FIX_TZ.sub(r'\1:\2', str(f.get('updated') or '')),
+                    'url': (site + '/browse/' + it.get('key', '')) if site and it.get('key') else '',
+                })
+            sync['issues'] = issues
+            sync['more'] = bool(data.get('nextPageToken'))
+        except urllib.error.HTTPError as e:
+            sync['jiraError'] = atl_err_text(e)
+        except OSError as e:
+            sync['jiraError'] = str(e)
+    if pages:
+        try:
+            ids = ','.join(str(d['id']) for d in pages)
+            _, data = atl_call('GET', '/wiki/api/v2/pages?id=' + ids)
+            results = data.get('results') or []
+            spaces = {}
+            sids = sorted({str(r.get('spaceId')) for r in results if r.get('spaceId')})
+            if sids:
+                try:
+                    _, sp = atl_call('GET', '/wiki/api/v2/spaces?ids=' + ','.join(sids))
+                    spaces = {str(s.get('id')): (s.get('name') or s.get('key') or '')
+                              for s in sp.get('results') or []}
+                except (urllib.error.HTTPError, OSError):
+                    pass
+            users = {}
+            for r in results:
+                aid = (r.get('version') or {}).get('authorId')
+                if aid and aid not in users:
+                    try:
+                        _, u = atl_call('GET', '/wiki/rest/api/user?accountId=' + quote(str(aid)))
+                        users[aid] = u.get('displayName') or ''
+                    except (urllib.error.HTTPError, OSError):
+                        users[aid] = ''
+            metas = {}
+            for r in results:
+                v = r.get('version') or {}
+                metas[str(r.get('id'))] = {
+                    'id': str(r.get('id')), 'title': r.get('title') or ('Page ' + str(r.get('id'))),
+                    'space': spaces.get(str(r.get('spaceId')), ''), 'version': v.get('number') or 0,
+                    'by': users.get(v.get('authorId'), ''), 'when': str(v.get('createdAt') or ''), 'url': ''}
+            out = []
+            for d in pages:
+                m = metas.get(str(d['id']))
+                if m:
+                    mm = dict(m)
+                    mm['url'] = d.get('url') or ''
+                    out.append(mm)
+                else:
+                    out.append({'id': str(d['id']), 'title': 'Page %s (introuvable ou accès refusé)' % d['id'],
+                                'space': '', 'version': 0, 'by': '', 'when': '',
+                                'url': d.get('url') or '', 'missing': True})
+            sync['pages'] = out
+        except urllib.error.HTTPError as e:
+            sync['dmexError'] = atl_err_text(e)
+        except OSError as e:
+            sync['dmexError'] = str(e)
+    sync['partial'] = bool(sync['jiraError']) != bool(sync['dmexError'])
+    return sync
+
+
+def atl_sync_sweep():
+    """Rafraîchit p.sync de toutes les fiches actives ; patch atomique + diffusion SSE."""
+    with db() as c:
+        rows = [(r['id'], json.loads(r['json'])) for r in c.execute('SELECT id, json FROM platforms')]
+        st = json.loads(c.execute("SELECT json FROM docs WHERE key='settings'").fetchone()['json'])
+    site = str(st.get('siteUrl') or '').rstrip('/')
+    n = 0
+    for pid, p in rows:
+        if p.get('stage') == 'run':
+            continue
+        new_sync = atl_sync_platform(p, site)
+        if new_sync is None:
+            continue
+        with db() as c:
+            row = c.execute('SELECT rev, json FROM platforms WHERE id=?', (pid,)).fetchone()
+            if not row:
+                continue
+            cur = json.loads(row['json'])
+            cur['sync'] = new_sync
+            upd = c.execute('UPDATE platforms SET rev=rev+1, json=?, updated_at=?, updated_by=? '
+                            'WHERE id=? AND rev=?',
+                            (json.dumps(cur, ensure_ascii=False), now(), 'synchro auto', pid, row['rev']))
+            ok = upd.rowcount == 1
+        if ok:
+            broadcast({'type': 'platform', 'id': pid, 'rev': row['rev'] + 1,
+                       'by': 'synchro auto', 'instance': ''})
+            n += 1
+    return {'synced': n, 'platforms': len(rows)}
+
+
+def atl_sync_loop():
+    if not CONF['atl_site'] or not CONF['atl_sync_minutes']:
+        return
+    while True:
+        time.sleep(max(60, CONF['atl_sync_minutes'] * 60))
+        try:
+            res = atl_sync_sweep()
+            print(json.dumps({'ts': now(), 'msg': 'synchro Atlassian automatique', **res}),
+                  file=sys.stderr, flush=True)
+        except Exception as e:
+            print(json.dumps({'ts': now(), 'msg': 'échec synchro auto', 'err': str(e)}),
+                  file=sys.stderr, flush=True)
+
+
+ISSUETYPE_CACHE = {}
+
+
+def jira_issuetype_id(project, name):
+    key = (project, name.lower())
+    if key not in ISSUETYPE_CACHE:
+        _, data = atl_call('GET', '/rest/api/3/issue/createmeta/%s/issuetypes' % quote(project))
+        types = data.get('issueTypes') or data.get('values') or []
+        for it in types:
+            if str(it.get('name', '')).lower() == name.lower():
+                ISSUETYPE_CACHE[key] = str(it.get('id'))
+                break
+        else:
+            raise RuntimeError('type de ticket « %s » introuvable dans le projet %s (types : %s)'
+                               % (name, project, ', '.join(str(t.get('name')) for t in types) or 'aucun'))
+    return ISSUETYPE_CACHE[key]
+
+
+def jira_create_issue(project, itype_name, summary, description):
+    """Crée un ticket (v3, description ADF, label passerelle). Retourne la clé."""
+    adf = {'type': 'doc', 'version': 1, 'content': [
+        {'type': 'paragraph', 'content': [{'type': 'text', 'text': description or summary}]}]}
+    payload = {'fields': {'project': {'key': project},
+                          'issuetype': {'id': jira_issuetype_id(project, itype_name)},
+                          'summary': summary[:250], 'description': adf,
+                          'labels': ['passerelle']}}
+    try:
+        _, data = atl_call('POST', '/rest/api/3/issue', payload)
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            txt = atl_err_text(e)
+            if 'label' in txt.lower():  # champ Labels absent de l'écran de création du projet
+                del payload['fields']['labels']
+                _, data = atl_call('POST', '/rest/api/3/issue', payload)
+            else:
+                raise RuntimeError(txt) from e
+        else:
+            raise
+    return data.get('key', '')
+
+
+# ---------- Pilotage : agrégats historisés ----------
+
+def p_score(p):
+    items = [i for i in (p.get('checklist') or []) if isinstance(i, dict)]
+    done = sum(1 for i in items if i.get('status') == 'done')
+    na = sum(1 for i in items if i.get('status') == 'na')
+    base = len(items) - na
+    return 100 if base <= 0 else round(done * 100 / base)
+
+
+def p_status(p, today):
+    if p.get('stage') == 'run':
+        return 'en_exploitation'
+    if any(isinstance(a, dict) and a.get('blocking') and not a.get('done')
+           for a in p.get('actions') or []):
+        return 'bloquee'
+    if (p.get('gonogo') or {}).get('pending'):
+        return 'a_contre_valider'
+    td = str(p.get('targetDate') or '')
+    idx = STAGE_ORDER.index(p['stage']) if p.get('stage') in STAGE_ORDER else 0
+    if td and td < today and idx < STAGE_ORDER.index('mep'):
+        return 'en_retard'
+    return 'en_cours'
+
+
+def _ts(v):
+    try:
+        return datetime.fromisoformat(str(v))
+    except ValueError:
+        return None
+
+
+def compute_stats():
+    today = time.strftime('%Y-%m-%d')
+    with db() as c:
+        evs = [dict(r) for r in c.execute('SELECT ts, platform_id, name, kind, detail FROM events ORDER BY seq')]
+        plats = [json.loads(r['json']) for r in c.execute('SELECT json FROM platforms')]
+    # Temps passé par étape (entre transitions consécutives, attribué à l'étape quittée)
+    per_p = {}
+    for e in evs:
+        per_p.setdefault(e['platform_id'], []).append(e)
+    stage_days = {}
+    mep_pids = set()
+    lead_days = []
+    for pid, seq in per_p.items():
+        prev_t, prev_stage, created_t = None, None, None
+        for e in seq:
+            t = _ts(e['ts'])
+            if t is None:
+                continue
+            if e['kind'] == 'created':
+                prev_t, prev_stage, created_t = t, (e['detail'] or 'cadrage'), t
+            elif e['kind'] == 'stage':
+                a, _, b = (e['detail'] or '').partition('→')
+                if prev_t is not None and prev_stage:
+                    stage_days.setdefault(prev_stage, []).append((t - prev_t).total_seconds() / 86400)
+                prev_t, prev_stage = t, b
+                if b == 'mep':
+                    mep_pids.add(pid)
+                    if created_t is not None:
+                        lead_days.append((t - created_t).total_seconds() / 86400)
+            elif e['kind'] == 'deleted':
+                prev_t = prev_stage = created_t = None
+    stage_durations = [{'stage': s, 'avgDays': round(statistics.fmean(v), 1),
+                        'medianDays': round(statistics.median(v), 1), 'count': len(v)}
+                       for s, v in ((s, stage_days[s]) for s in STAGE_ORDER if s in stage_days)]
+    # MEP par mois (12 mois) : événements → mep, complétés par les goLiveDate des fiches sans événement
+    months = []
+    y, m = int(today[:4]), int(today[5:7])
+    for _ in range(12):
+        months.append('%04d-%02d' % (y, m))
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    months.reverse()
+    mep_by_month = {k: 0 for k in months}
+    for e in evs:
+        if e['kind'] == 'stage' and str(e['detail'] or '').endswith('→mep') and e['ts'][:7] in mep_by_month:
+            mep_by_month[e['ts'][:7]] += 1
+    for p in plats:
+        gl = str(p.get('goLiveDate') or '')
+        if gl and str(p.get('id')) not in mep_pids and gl[:7] in mep_by_month:
+            mep_by_month[gl[:7]] += 1
+    # Repli délai création→MEP pour les fiches sans historique
+    for p in plats:
+        if str(p.get('id')) in mep_pids:
+            continue
+        gl, cr = str(p.get('goLiveDate') or ''), _ts(str(p.get('createdAt') or '')[:19])
+        if gl and cr:
+            t = _ts(gl + 'T00:00:00')
+            if t:
+                lead_days.append(max(0.0, (t - cr.replace(tzinfo=None)).total_seconds() / 86400))
+    decisions = {'go': 0, 'go_reserves': 0, 'nogo': 0}
+    for e in evs:
+        if e['kind'] == 'decision' and e['detail'] in decisions:
+            decisions[e['detail']] += 1
+    # État courant
+    active = [p for p in plats if p.get('stage') != 'run']
+    blocked = sum(1 for p in plats if p_status(p, today) == 'bloquee')
+    late = sum(1 for p in plats if p_status(p, today) == 'en_retard')
+    pending = sum(1 for p in plats if (p.get('gonogo') or {}).get('pending'))
+    cutoff = (datetime.now() - timedelta(days=183)).strftime('%Y-%m-%d')
+    dmex_old = sum(1 for p in plats for pg in (p.get('sync') or {}).get('pages') or []
+                   if isinstance(pg, dict) and str(pg.get('when') or '')[:10] and str(pg['when'])[:10] < cutoff)
+    week_ago = (datetime.now() - timedelta(days=7)).isoformat(timespec='seconds')
+    stale = sum(1 for p in active
+                if (str(p.get('jiraJql') or '').strip() or (p.get('dmexPages') or []))
+                and str((p.get('sync') or {}).get('at') or '') < week_ago)
+    mep_90 = sum(n for k, n in mep_by_month.items() if k >= (datetime.now() - timedelta(days=90)).strftime('%Y-%m'))
+    return {
+        'since': evs[0]['ts'] if evs else '',
+        'stageDurations': stage_durations,
+        'mepByMonth': [{'month': k, 'count': mep_by_month[k]} for k in months],
+        'mep90': mep_90,
+        'decisions': decisions,
+        'leadTimeMedianDays': round(statistics.median(lead_days), 1) if lead_days else None,
+        'current': {'active': len(active), 'blocked': blocked, 'late': late,
+                    'pendingConfirm': pending, 'dmexOld': dmex_old, 'staleSync': stale},
+    }
+
+
+# ---------- Flux iCalendar (dates cibles de MEP) ----------
+
+def ics_esc(s):
+    return (str(s).replace('\\', '\\\\').replace(';', '\\;')
+            .replace(',', '\\,').replace('\r', '').replace('\n', '\\n'))
+
+
+def ics_fold(line):
+    b = line.encode('utf-8')
+    if len(b) <= 74:
+        return line
+    parts, first = [], True
+    while b:
+        cut = min(74 if first else 73, len(b))
+        while 0 < cut < len(b) and (b[cut] & 0xC0) == 0x80:
+            cut -= 1
+        parts.append(b[:cut].decode('utf-8'))
+        b = b[cut:]
+        first = False
+    return '\r\n '.join(parts)
+
+
+def build_ics():
+    with db() as c:
+        plats = [json.loads(r['json']) for r in c.execute('SELECT json FROM platforms')]
+    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Passerelle//MEE//FR',
+             'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:Passerelle — MEP']
+    cutoff = (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d')
+
+    def vevent(uid, day, summary, desc):
+        try:
+            d = datetime.strptime(day, '%Y-%m-%d')
+        except ValueError:
+            return
+        lines.extend([
+            'BEGIN:VEVENT',
+            'UID:' + uid,
+            'DTSTAMP:' + stamp,
+            'DTSTART;VALUE=DATE:' + d.strftime('%Y%m%d'),
+            'DTEND;VALUE=DATE:' + (d + timedelta(days=1)).strftime('%Y%m%d'),
+            ics_fold('SUMMARY:' + ics_esc(summary)),
+            ics_fold('DESCRIPTION:' + ics_esc(desc)),
+            'END:VEVENT'])
+
+    for p in plats:
+        pid = str(p.get('id') or '')
+        name = str(p.get('name') or 'Plateforme')
+        crit = str(p.get('criticality') or '')
+        desc = 'Porteur : %s — étape : %s' % (p.get('owner') or '—', p.get('stage') or '—')
+        if p.get('stage') != 'run' and str(p.get('targetDate') or ''):
+            vevent('pmee-%s-cible@passerelle' % pid, str(p['targetDate']),
+                   'MEP — %s (%s)' % (name, crit), desc)
+        gl = str(p.get('goLiveDate') or '')
+        if gl and gl >= cutoff:
+            vevent('pmee-%s-mep@passerelle' % pid, gl,
+                   'MEP réalisée — %s' % name, desc)
+    lines.append('END:VCALENDAR')
+    return '\r\n'.join(ics_fold(l) for l in lines) + '\r\n'
+
+
 # ---------- Handler HTTP ----------
 
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; "
@@ -624,7 +1024,9 @@ class Handler(BaseHTTPRequestHandler):
                     n = c.execute('SELECT COUNT(*) FROM platforms').fetchone()[0]
                 return self._json(200, {'ok': True, 'app': 'passerelle', 'version': VERSION,
                                         'platforms': n, 'atlassian': bool(CONF['atl_site']),
-                                        'notify': notify_channels()})
+                                        'notify': notify_channels(),
+                                        'autosync': CONF['atl_sync_minutes'] if CONF['atl_site'] else 0,
+                                        'api': bool(CONF['api_tokens'])})
             except sqlite3.Error as e:
                 return self._json(500, {'ok': False, 'error': str(e)})
         if method == 'GET' and path == '/metrics':
@@ -632,6 +1034,24 @@ class Handler(BaseHTTPRequestHandler):
         if method == 'GET' and path in ('/', '/index.html'):
             with open(CONF['app'], 'rb') as f:
                 return self._send(200, f.read(), 'text/html; charset=utf-8')
+
+        # API machine (CMDB/ITSM) + flux ICS : jeton dédié, lecture seule
+        if path.startswith('/api/v1/') or path == '/api/calendar.ics':
+            if not CONF['api_tokens']:
+                return self._err(503, 'API machine désactivée (variable API_TOKENS non configurée).')
+            tok = ''
+            auth = self.headers.get('Authorization', '')
+            if auth.startswith('Bearer '):
+                tok = auth[7:].strip()
+            if not tok:
+                tok = (parse_qs(parts.query).get('token') or [''])[0]
+            if not any(hmac.compare_digest(tok, t) for t in CONF['api_tokens']):
+                return self._err(401, 'Jeton API invalide ou absent (Authorization: Bearer … ou ?token=…).')
+            self._user = 'api:' + tok[:4]
+            if method != 'GET':
+                self.close_connection = True
+                return self._err(405, 'API machine en lecture seule.')
+            return self.api_machine(path)
 
         # Tout le reste exige une identité
         user = self.identity()
@@ -662,7 +1082,49 @@ class Handler(BaseHTTPRequestHandler):
         if method == 'GET' and path == '/api/me':
             return self._json(200, {'app': 'passerelle', 'version': VERSION,
                                     'email': user['email'], 'name': user['name'], 'role': user['role'],
-                                    'atlassian': bool(CONF['atl_site'])})
+                                    'atlassian': bool(CONF['atl_site']),
+                                    'syncMinutes': CONF['atl_sync_minutes'] if CONF['atl_site'] else 0})
+
+        if method == 'GET' and path == '/api/stats':
+            return self._json(200, compute_stats())
+
+        if method == 'POST' and path == '/api/jira/issue':
+            if not write:
+                return self._err(403, 'Lecture seule : votre rôle ne permet pas de modifier.')
+            if not CONF['atl_site']:
+                return self._err(503, 'Intégration Atlassian non configurée sur ce serveur (ATL_SITE).')
+            body = self.read_body()
+            summary = str((body or {}).get('summary') or '').strip()
+            if not summary:
+                return self._err(400, 'Corps attendu : {"summary": …, "description": …}.')
+            with db() as c:
+                st = json.loads(c.execute("SELECT json FROM docs WHERE key='settings'").fetchone()['json'])
+            project = str(st.get('jiraProject') or '').strip()
+            if not project:
+                return self._err(503, 'Projet Jira non configuré (Paramètres → Intégration Atlassian, clé du projet).')
+            try:
+                key = jira_create_issue(project, str(st.get('jiraIssueType') or 'Task'),
+                                        summary, str((body or {}).get('description') or ''))
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    return self._err(429, 'Limite Jira atteinte — réessayez dans %s s.'
+                                     % (e.headers.get('Retry-After') or 'quelques'))
+                return self._err(502 if e.code >= 500 else 400, 'Jira : ' + atl_err_text(e))
+            except (OSError, RuntimeError) as e:
+                return self._err(502, 'Jira : %s' % e)
+            site = str(st.get('siteUrl') or '').rstrip('/')
+            url = (site + '/browse/' + key) if site and key else ''
+            audit(user['email'], 'jira', str((body or {}).get('platformId') or ''), key, None)
+            return self._json(201, {'key': key, 'url': url})
+
+        if method == 'POST' and path == '/api/atlassian/sync-now':
+            if not admin:
+                return self._err(403, 'Réservé aux administrateurs.')
+            if not CONF['atl_site']:
+                return self._err(503, 'Intégration Atlassian non configurée sur ce serveur (ATL_SITE).')
+            res = atl_sync_sweep()
+            audit(user['email'], 'synchro', '', '%d fiche(s)' % res['synced'], None)
+            return self._json(200, dict(res, ok=True))
 
         if method == 'GET' and path == '/api/state':
             with db() as c:
@@ -699,7 +1161,9 @@ class Handler(BaseHTTPRequestHandler):
                        'template': json.loads(trow['json']) if trow else None,
                        'settings': {'readyThreshold': st.get('readyThreshold', 90),
                                     'gonogoValidation': st.get('gonogoValidation', 'C1C2'),
-                                    'customFields': st.get('customFields', []), 'userName': ''},
+                                    'customFields': st.get('customFields', []),
+                                    'jiraProject': st.get('jiraProject', ''),
+                                    'jiraIssueType': st.get('jiraIssueType', 'Task'), 'userName': ''},
                        'integrations': {'relayUrl': '', 'siteUrl': st.get('siteUrl', ''),
                                         'dmexLabel': st.get('dmexLabel', 'asset-dip'), 'relayToken': ''}}
             return self._json(200, payload,
@@ -737,6 +1201,7 @@ class Handler(BaseHTTPRequestHandler):
                 except sqlite3.IntegrityError:
                     return self._err(409, 'Une fiche porte déjà cet identifiant.')
             audit(user['email'], 'création', str(data['id']), str(data.get('name', '')), 1)
+            record_event(str(data['id']), str(data.get('name', '')), 'created', str(data.get('stage', 'cadrage')))
             broadcast({'type': 'platform', 'id': str(data['id']), 'rev': 1, 'by': user['name'],
                        'instance': self.headers.get('X-Client-Instance', '')})
             return self._json(201, {'id': str(data['id']), 'rev': 1})
@@ -769,6 +1234,15 @@ class Handler(BaseHTTPRequestHandler):
                         return self._err(404, 'Fiche introuvable (supprimée ?).')
                     return self._json(409, {'error': 'Conflit de version.', 'current': row_platform(row)})
             audit(user['email'], 'modification', pid, str(data.get('name', '')), rev + 1)
+            old_data = json.loads(row_old['json'])
+            if str(old_data.get('stage', '')) != str(data.get('stage', '')):
+                record_event(pid, str(data.get('name', '')), 'stage',
+                             '%s→%s' % (old_data.get('stage', ''), data.get('stage', '')))
+            old_gg = old_data.get('gonogo') if isinstance(old_data.get('gonogo'), dict) else {}
+            new_gg = data.get('gonogo') if isinstance(data.get('gonogo'), dict) else {}
+            if new_gg.get('decision') and not new_gg.get('pending') \
+                    and (old_gg.get('decision') != new_gg.get('decision') or old_gg.get('pending')):
+                record_event(pid, str(data.get('name', '')), 'decision', str(new_gg.get('decision')))
             broadcast({'type': 'platform', 'id': pid, 'rev': rev + 1, 'by': user['name'],
                        'instance': self.headers.get('X-Client-Instance', '')})
             return self._json(200, {'rev': rev + 1})
@@ -781,6 +1255,7 @@ class Handler(BaseHTTPRequestHandler):
                 name = json.loads(row['json']).get('name', '')
                 c.execute('DELETE FROM platforms WHERE id=?', (pid,))
             audit(user['email'], 'suppression', pid, str(name), None)
+            record_event(pid, str(name), 'deleted', '')
             broadcast({'type': 'platform_delete', 'id': pid, 'by': user['name'],
                        'instance': self.headers.get('X-Client-Instance', '')})
             return self._json(200, {'ok': True})
@@ -841,7 +1316,9 @@ class Handler(BaseHTTPRequestHandler):
                   'dmexLabel': integ_in.get('dmexLabel', 'asset-dip'),
                   'siteUrl': integ_in.get('siteUrl', ''),
                   'gonogoValidation': settings_in.get('gonogoValidation', 'C1C2'),
-                  'customFields': settings_in.get('customFields', [])}
+                  'customFields': settings_in.get('customFields', []),
+                  'jiraProject': settings_in.get('jiraProject', ''),
+                  'jiraIssueType': settings_in.get('jiraIssueType', 'Task')}
             with db() as c:
                 c.execute('DELETE FROM platforms')
                 seen = set()
@@ -877,6 +1354,33 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {'ok': True})
 
         return self._err(404, 'Chemin inconnu.')
+
+    # ----- API machine (lecture seule, jeton) -----
+    def api_machine(self, path):
+        today = time.strftime('%Y-%m-%d')
+        if path == '/api/calendar.ics':
+            return self._send(200, build_ics(), 'text/calendar; charset=utf-8',
+                              [('Content-Disposition', 'inline; filename="passerelle.ics"')])
+        if path == '/api/v1/platforms':
+            with db() as c:
+                rows = c.execute('SELECT * FROM platforms').fetchall()
+            out = []
+            for r in rows:
+                p = json.loads(r['json'])
+                out.append({'id': r['id'], 'rev': r['rev'],
+                            'name': p.get('name', ''), 'type': p.get('type', ''),
+                            'criticality': p.get('criticality', ''), 'stage': p.get('stage', ''),
+                            'status': p_status(p, today), 'score': p_score(p),
+                            'owner': p.get('owner', ''), 'sponsor': p.get('sponsor', ''),
+                            'targetDate': p.get('targetDate', ''), 'goLiveDate': p.get('goLiveDate', ''),
+                            'updatedAt': r['updated_at'], 'updatedBy': r['updated_by']})
+            return self._json(200, {'app': 'passerelle', 'version': VERSION, 'platforms': out})
+        if path.startswith('/api/v1/platforms/'):
+            pid = unquote(path[len('/api/v1/platforms/'):])
+            with db() as c:
+                row = c.execute('SELECT * FROM platforms WHERE id=?', (pid,)).fetchone()
+            return self._json(200, row_platform(row)) if row else self._err(404, 'Fiche introuvable.')
+        return self._err(404, 'Chemin inconnu (API v1 : /api/v1/platforms, /api/v1/platforms/{id}, /api/calendar.ics).')
 
     # ----- SSE -----
     def sse(self):
@@ -961,6 +1465,7 @@ def main():
     init_db()
     threading.Thread(target=backup_loop, daemon=True).start()
     threading.Thread(target=notify_loop, daemon=True).start()
+    threading.Thread(target=atl_sync_loop, daemon=True).start()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
     print(json.dumps({'ts': now(), 'msg': 'Passerelle v%s démarrée' % VERSION,

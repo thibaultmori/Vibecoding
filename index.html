@@ -430,6 +430,13 @@ textarea.io{width:100%; min-height:110px; font-family:var(--mono); font-size:12p
 
 /* Recherche globale & audit */
 mark{background:var(--accent-soft); color:var(--accent-ink); border-radius:3px; padding:0 2px}
+
+/* Rapport de revue (impression) */
+.print-only{display:none}
+.sig-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:10px}
+.sig-box{border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-height:92px}
+.sig-name{font-weight:600; margin-top:2px; min-height:1.4em}
+.sig-line{margin-top:20px; border-top:1px solid var(--line2); padding-top:4px; font-size:11.5px; color:var(--ink3)}
 .ref-row{display:flex; align-items:center; gap:8px; padding:6px 18px; border-top:1px dashed var(--line); flex-wrap:wrap}
 .ref-row input[type="text"],.ref-row input:not([type]){flex:1; min-width:180px; padding:5px 8px; font-size:13px}
 .ref-crits{display:flex; gap:8px; flex-wrap:wrap}
@@ -445,6 +452,7 @@ mark{background:var(--accent-soft); color:var(--accent-ink); border-radius:3px; 
   .card{box-shadow:none; border-color:#bbb; break-inside:avoid}
   .det-grid{grid-template-columns:1fr}
   .cat-body{display:block !important}
+  .print-only{display:block !important}
 }
 
 /* ============ Responsive ============ */
@@ -505,7 +513,7 @@ mark{background:var(--accent-soft); color:var(--accent-ink); border-radius:3px; 
    Application autonome : aucune dépendance, stockage local navigateur.
    ================================================================= */
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 
 /* Mode serveur (v2) : détecté au démarrage si la page est servie par server.py.
    Sinon, l'application reste en mode local (localStorage), comme en v1. */
@@ -673,7 +681,7 @@ let state = null;
 const ui = {
   q:'', filters:{stage:'',crit:'',status:'',team:''}, sort:'date',
   catOpen:{}, comments:{}, refocus:null, test:{},
-  searchQ:'', audit:{entries:null, limit:300, q:''}, refDraft:null,
+  searchQ:'', audit:{entries:null, limit:300, q:''}, refDraft:null, stats:null,
 };
 let lastHash = null;
 
@@ -765,8 +773,8 @@ const MUTATING_ACTIONS = new Set(['new-platform','edit-platform','delete-platfor
   'new-team','edit-team','delete-team','load-demo','reset-demo','wipe-all','import-apply',
   'restore-backup','make-backup','server-backup','del-dmex','dmex-attach','sync-platform',
   'confirm-decision','ref-save','ref-apply','ref-add-cat','ref-del-cat','ref-add-item','ref-del-item',
-  'ref-move','ref-reset','cf-del']);
-const ADMIN_CHANGES = new Set(['threshold','int-site','int-label','gng-validation']);
+  'ref-move','ref-reset','cf-del','action-jira']);
+const ADMIN_CHANGES = new Set(['threshold','int-site','int-label','gng-validation','int-jproj','int-jtype']);
 
 async function api(path, opts){
   const o = Object.assign({headers:{}}, opts||{});
@@ -793,6 +801,8 @@ const sharedSettings = () => ({
   siteUrl: state.integrations.siteUrl,
   gonogoValidation: state.settings.gonogoValidation,
   customFields: state.settings.customFields,
+  jiraProject: state.settings.jiraProject,
+  jiraIssueType: state.settings.jiraIssueType,
 });
 const sharedSettingsJson = () => JSON.stringify(sharedSettings());
 
@@ -803,6 +813,8 @@ function applySharedSettings(d){
   state.integrations.siteUrl = safeUrl(d.siteUrl);
   state.settings.gonogoValidation = ['off','C1','C1C2','all'].includes(d.gonogoValidation) ? d.gonogoValidation : 'C1C2';
   state.settings.customFields = Array.isArray(d.customFields) ? d.customFields : [];
+  state.settings.jiraProject = String(d.jiraProject||'').trim();
+  state.settings.jiraIssueType = String(d.jiraIssueType||'Task').trim() || 'Task';
 }
 
 async function loadServerState(){
@@ -990,7 +1002,7 @@ function loadState(){
 function blankState(){
   return {
     version:1, seeded:false, seedBannerHidden:false,
-    settings:{readyThreshold:90, userName:''},
+    settings:{readyThreshold:90, userName:'', gonogoValidation:'C1C2', customFields:[], jiraProject:'', jiraIssueType:'Task'},
     integrations:{relayUrl:'', siteUrl:'', dmexLabel:'asset-dip', relayToken:''},
     teams:[], platforms:[],
     lastExportAt:'',
@@ -1005,8 +1017,11 @@ const BLANK_SYNC = () => ({at:'', jiraError:'', dmexError:'', partial:false, mor
 function normalizeState(s){
   const str = v => String(v==null?'':v);
   const day = v => ISO_DAY.test(str(v)) ? str(v) : '';
-  s.settings = Object.assign({readyThreshold:90, userName:'', gonogoValidation:'C1C2', customFields:[]},
+  s.settings = Object.assign({readyThreshold:90, userName:'', gonogoValidation:'C1C2', customFields:[],
+      jiraProject:'', jiraIssueType:'Task'},
     (s.settings&&typeof s.settings==='object')?s.settings:{});
+  s.settings.jiraProject = str(s.settings.jiraProject).trim();
+  s.settings.jiraIssueType = str(s.settings.jiraIssueType).trim() || 'Task';
   let th = parseInt(s.settings.readyThreshold, 10);
   s.settings.readyThreshold = isNaN(th) ? 90 : Math.min(100, Math.max(50, th));
   s.settings.userName = str(s.settings.userName);
@@ -1048,6 +1063,7 @@ function normalizeState(s){
     p.actions.forEach(a=>{
       a.id = str(a.id) || uid('a'); a.label = str(a.label);
       a.due = day(a.due); a.blocking = !!a.blocking; a.done = !!a.done;
+      a.jiraKey = str(a.jiraKey); a.jiraUrl = safeUrl(a.jiraUrl);
     });
     p.journal = (Array.isArray(p.journal)?p.journal:[]).filter(j=>j && typeof j==='object')
       .map(j=>({ts:str(j.ts), text:str(j.text), by:str(j.by)}));
@@ -1550,6 +1566,7 @@ const ICONS = {
   sync:'<path d="M20 4.5V10h-5.5M4 19.5V14h5.5M19.6 10a8 8 0 0 0-13.9-3.2L4 9M4.4 14a8 8 0 0 0 13.9 3.2L20 15"/>',
   ref:'<path d="M9.5 6h11M9.5 12h11M9.5 18h11M3 5.5l1.5 1.5L7 4M3 11.5l1.5 1.5L7 10M3 17.5l1.5 1.5L7 16"/>',
   act:'<path d="M3 12h4l2.5-7 5 14 2.5-7h4"/>',
+  chart:'<path d="M5 20v-6M11 20V5M17 20v-10M3 20h18"/>',
 };
 const icon = n => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(ICONS[n]||'')+'</svg>';
 
@@ -1755,7 +1772,9 @@ function vList(){
   const ps = filteredPlatforms();
   let html = '<div class="topbar"><div><h1>Plateformes</h1>'+
     '<p class="sub">'+ps.length+' résultat'+(ps.length>1?'s':'')+' sur '+state.platforms.length+'</p></div>'+
-    '<div class="topbar-actions">'+(canWrite()?'<button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button>':'')+'</div></div>';
+    '<div class="topbar-actions">'+
+    (state.platforms.length?'<button class="btn" data-action="export-csv" title="Exporte les fiches filtrées">'+icon('down')+'CSV</button>':'')+
+    (canWrite()?'<button class="btn btn-primary" data-action="new-platform">'+icon('plus')+'Nouvelle plateforme</button>':'')+'</div></div>';
   html += storageBanner() + seedBanner();
 
   html += '<div class="filters">'+
@@ -1860,6 +1879,21 @@ function vDetail(id){
     }).join('')+'</div>'+
   '</div>';
 
+  /* Bloc signatures du rapport de revue (impression uniquement) */
+  const sigBox = (role, name2, date2)=>'<div class="sig-box"><div class="tiny muted">'+role+'</div>'+
+    '<div class="sig-name">'+(name2?esc(name2):'')+'</div>'+
+    '<div class="tiny muted">'+(date2?'Le '+esc(date2):'Date :')+'</div>'+
+    '<div class="sig-line">Signature :</div></div>';
+  html += '<div class="print-only card card-pad" style="margin-top:14px">'+
+    '<h2 class="card-title" style="margin-bottom:4px">Rapport de revue de mise en exploitation</h2>'+
+    '<p class="tiny muted">Édité le '+fmtD(todayISO())+' · Passerelle v'+APP_VERSION+
+    (serverMode && serverTemplate ? ' · référentiel v'+serverTemplate.version : '')+
+    ' · préparation '+sc+' % · décision : '+(p.gonogo.decision ? (GG_LBL[p.gonogo.decision]+(p.gonogo.pending?' (en attente de contre-validation)':'')) : 'non prononcée')+'</p>'+
+    '<div class="sig-grid">'+
+    sigBox('Décision proposée par', p.gonogo.decidedBy, p.gonogo.date?fmtD(p.gonogo.date):'')+
+    sigBox('Contre-validée par', p.gonogo.confirmedBy, p.gonogo.confirmedAt?fmtDateOfTs(p.gonogo.confirmedAt):'')+
+    '</div></div>';
+
   html += '<div class="det-grid"><div class="det-col">';
 
   /* Checklist */
@@ -1916,6 +1950,13 @@ function vDetail(id){
       '<input type="checkbox" class="act-chk" '+(a.done?'checked':'')+' data-change="toggle-action" data-id="'+esc(p.id)+'" data-act="'+esc(a.id)+'" aria-label="Action faite">'+
       '<span class="act-label'+(a.done?' done':'')+'">'+esc(a.label)+'</span>'+
       (a.blocking && !a.done ? chip('Bloquante','crit') : '')+
+      (a.jiraKey
+        ? (safeUrl(a.jiraUrl)
+            ? '<a class="chip stage" href="'+esc(safeUrl(a.jiraUrl))+'" target="_blank" rel="noopener noreferrer">'+esc(a.jiraKey)+'</a>'
+            : chip(a.jiraKey,'stage'))
+        : (serverMode && me && me.atlassian && canWrite() && !a.done
+            ? '<button class="btn btn-s btn-ghost" data-action="action-jira" data-id="'+esc(p.id)+'" data-act="'+esc(a.id)+'" title="Créer un ticket Jira pour cette action">'+icon('arr')+'Ticket Jira</button>'
+            : ''))+
       '<span class="act-meta">'+(a.due?'<span class="'+(overdue?'late':'')+'">'+fmtD(a.due)+'</span>':'')+'</span>'+
       '<button class="icon-btn" data-action="del-action" data-id="'+esc(p.id)+'" data-act="'+esc(a.id)+'" title="Supprimer" aria-label="Supprimer l’action">'+icon('trash')+'</button>'+
     '</div>';
@@ -2030,9 +2071,10 @@ function cardJira(p){
       ? '<p class="empty-note">Aucun ticket synchronisé pour l’instant — cliquez sur « Synchroniser ».</p>'
       : '<p class="empty-note">Renseignez la JQL du chantier puis synchronisez. Le relais se configure dans <a href="#/parametres">Paramètres</a>.</p>';
   }
-  if(s.at || s.more){
+  if(s.at || s.more || (serverMode && me && me.syncMinutes)){
     html += '<div class="int-foot">'+(s.at?'<span>Synchronisé le '+esc(fmtTs(s.at))+'</span>':'')+
-      (s.more?'<span>50 premiers tickets affichés</span>':'')+'</div>';
+      (s.more?'<span>50 premiers tickets affichés</span>':'')+
+      (serverMode && me && me.syncMinutes ? '<span>actualisation automatique toutes les '+me.syncMinutes+' min</span>':'')+'</div>';
   }
   return html+'</div>';
 }
@@ -2201,6 +2243,12 @@ function vSettings(){
     (serverMode ? '' :
       '<div class="set-row"><label for="int-token">Jeton d’accès au relais (si RELAY_ACCESS_TOKEN y est configuré)</label>'+
       '<input id="int-token" type="password" data-change="int-token" value="'+esc(it.relayToken)+'" placeholder="optionnel" style="min-width:200px" class="mono" autocomplete="off"></div>')+
+    (serverMode
+      ? '<div class="set-row"><label for="int-jproj">Projet Jira pour la création de tickets (clé)'+admNote+'</label>'+
+        '<input id="int-jproj" data-change="int-jproj" value="'+esc(state.settings.jiraProject)+'" placeholder="ex. INFRA" style="min-width:130px" class="mono"'+admDis+'></div>'+
+        '<div class="set-row"><label for="int-jtype">Type de ticket créé'+admNote+'</label>'+
+        '<input id="int-jtype" data-change="int-jtype" value="'+esc(state.settings.jiraIssueType)+'" placeholder="Task" style="min-width:130px"'+admDis+'></div>'
+      : '')+
     '<div class="set-row">'+
       '<button class="btn" data-action="test-atl" data-kind="jira">Tester Jira</button>'+
       '<button class="btn" data-action="test-atl" data-kind="confluence">Tester Confluence</button>'+
@@ -2302,6 +2350,72 @@ function vSearch(){
         '<div class="row-sub">'+r.snippet+'</div></div>'+icon('chev')+'</div>').join('')+
       '</div></div>';
   });
+  return html;
+}
+
+/* ---------- Vue : pilotage (agrégats historisés) ---------- */
+
+async function loadStats(){
+  try{ ui.stats = await api('/api/stats'); }
+  catch(e){ ui.stats = {error:e.message}; }
+  if(route().view === 'stats') render();
+}
+
+const FMT_MONTH = new Intl.DateTimeFormat('fr-FR', {month:'short'});
+function monthLabel(k){
+  const d = new Date(k+'-01T00:00:00');
+  return isNaN(d) ? k : FMT_MONTH.format(d)+' '+k.slice(2,4);
+}
+
+function vStats(){
+  let html = '<div class="topbar"><div><h1>Pilotage</h1>'+
+    '<p class="sub">Tendances du portefeuille de mises en exploitation — historique constitué côté serveur</p></div>'+
+    '<div class="topbar-actions"><button class="btn" data-action="stats-reload">'+icon('sync')+'Actualiser</button></div></div>';
+  if(!serverMode) return html + '<div class="card"><p class="empty-note">Disponible en mode référentiel partagé uniquement.</p></div>';
+  if(ui.stats === null){
+    loadStats();
+    return html + '<div class="card"><p class="empty-note">Calcul en cours…</p></div>';
+  }
+  const s = ui.stats;
+  if(s.error) return html + '<div class="card"><div class="int-error" style="margin:14px 18px">'+esc(s.error)+'</div></div>';
+
+  const dec = s.decisions || {};
+  const decTotal = (dec.go||0)+(dec.go_reserves||0)+(dec.nogo||0);
+  const tauxReserves = decTotal ? Math.round((dec.go_reserves||0)*100/decTotal)+' %' : '—';
+  html += '<div class="tiles">'+
+    tile('MEP — 90 jours', s.mep90||0, 'mises en production', '')+
+    tile('Délai création → MEP', s.leadTimeMedianDays!=null ? s.leadTimeMedianDays+' j' : '—', 'médiane', '')+
+    tile('Go avec réserves', tauxReserves, decTotal ? 'sur '+decTotal+' décision'+(decTotal>1?'s':'') : 'aucune décision tracée', decTotal && (dec.go_reserves||0)/decTotal>0.4 ? 'warn':'')+
+    tile('DMEX à rafraîchir', (s.current&&s.current.dmexOld)||0, 'pages > 6 mois', (s.current&&s.current.dmexOld)?'warn':'')+
+    tile('Synchros anciennes', (s.current&&s.current.staleSync)||0, 'fiches sans synchro > 7 j', '')+
+  '</div>';
+
+  html += '<div class="dash-grid"><div class="dash-col">';
+  /* MEP par mois */
+  const mm = s.mepByMonth || [];
+  const mmax = Math.max(1, ...mm.map(x=>x.count));
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Mises en production par mois</h2></div><div class="card-pad bars">'+
+    mm.map(x=>'<div class="bar-row'+(x.count?'':' zero')+'"><span class="bar-label">'+esc(monthLabel(x.month))+'</span>'+
+      '<span class="bar-track"><span class="bar-fill" style="width:'+(x.count/mmax*100)+'%"></span></span>'+
+      '<span class="bar-val">'+x.count+'</span></div>').join('')+
+  '</div></div>';
+  /* Décisions */
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Décisions Go/No-Go tracées</h2></div><div class="card-pad" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center">'+
+    chip('GO : '+(dec.go||0),'good')+chip('GO avec réserves : '+(dec.go_reserves||0),'warn')+chip('NO-GO : '+(dec.nogo||0),'crit')+
+    '<span class="tiny muted">décisions effectives (contre-validées le cas échéant)</span></div></div>';
+  html += '</div><div class="dash-col">';
+  /* Temps par étape */
+  const sd = s.stageDurations || [];
+  const dmax = Math.max(1, ...sd.map(x=>x.avgDays));
+  html += '<div class="card"><div class="card-head"><h2 class="card-title">Temps moyen par étape</h2></div><div class="card-pad bars">'+
+    (sd.length ? sd.map(x=>'<div class="bar-row"><span class="bar-label" title="'+x.count+' transition'+(x.count>1?'s':'')+'">'+esc(stageLabel(x.stage))+'</span>'+
+      '<span class="bar-track"><span class="bar-fill" style="width:'+(x.avgDays/dmax*100)+'%"></span></span>'+
+      '<span class="bar-val">'+x.avgDays+' j</span></div>').join('')
+    : '<p class="tiny muted">Pas encore de transitions tracées — l’historique se constitue au fil des changements d’étape.</p>')+
+    (sd.length?'<p class="tiny muted" style="margin-top:6px">Moyenne des jours passés dans l’étape avant transition (médiane et effectifs au survol).</p>':'')+
+  '</div></div>';
+  html += '<p class="tiny muted">'+(s.since?'Historique depuis le '+esc(fmtTs(s.since))+'.':'')+' Les fiches antérieures au pilotage sont prises en compte via leurs dates de MEP réelles.</p>';
+  html += '</div></div>';
   return html;
 }
 
@@ -2412,6 +2526,7 @@ function navItems(){
     {hash:'#/equipes',         label:'Équipes',         ic:'users'},
   ];
   if(serverMode){
+    items.push({hash:'#/pilotage',    label:'Pilotage',    ic:'chart'});
     items.push({hash:'#/activite',    label:'Activité',    ic:'act'});
     items.push({hash:'#/referentiel', label:'Référentiel', ic:'ref'});
   }
@@ -2428,14 +2543,16 @@ function route(){
     return {view:'detail', id};
   }
   const map = {'#/tableau-de-bord':'dashboard','#/plateformes':'list','#/pipeline':'kanban','#/equipes':'teams',
-               '#/parametres':'settings','#/recherche':'search','#/activite':'audit','#/referentiel':'ref'};
+               '#/parametres':'settings','#/recherche':'search','#/activite':'audit','#/referentiel':'ref',
+               '#/pilotage':'stats'};
   return {view: map[h] || 'dashboard'};
 }
 
 function render(){
   const r = route();
   const activeHash = {'dashboard':'#/tableau-de-bord','list':'#/plateformes','kanban':'#/pipeline','teams':'#/equipes',
-    'settings':'#/parametres','detail':'#/plateformes','search':'#/recherche','audit':'#/activite','ref':'#/referentiel'}[r.view];
+    'settings':'#/parametres','detail':'#/plateformes','search':'#/recherche','audit':'#/activite','ref':'#/referentiel',
+    'stats':'#/pilotage'}[r.view];
   $('#nav').innerHTML = navItems().map(n=>'<a class="nav-a'+(n.hash===activeHash?' active':'')+'" href="'+n.hash+'">'+icon(n.ic)+esc(n.label)+'</a>').join('');
   $('#side-foot').innerHTML =
     (serverMode && me ? '<strong>'+esc(me.name)+'</strong> · '+esc(me.role)+'<br>' : '')+
@@ -2458,7 +2575,7 @@ function render(){
   });
 
   const views = {dashboard:vDashboard, list:vList, kanban:vKanban, teams:vTeams, settings:vSettings,
-                 search:vSearch, audit:vAudit, ref:vRef};
+                 search:vSearch, audit:vAudit, ref:vRef, stats:vStats};
   $('#view').innerHTML = r.view==='detail' ? vDetail(r.id) : views[r.view]();
   if(sameRoute) window.scrollTo(0,y); else window.scrollTo(0,0);
 
@@ -2665,9 +2782,33 @@ function versionGt(a, b){
   return false;
 }
 
+/* Téléchargement d'un fichier texte : capacité « downloads » en Artifact, blob sinon */
+async function saveTextFile(filename, data, mime, okMsg){
+  const dl = (window.claude && typeof window.claude.use==='function')
+    ? await window.claude.use('downloads').catch(()=>null) : null;
+  if(dl){
+    try{ await dl.save({filename, data}); toast(okMsg,'good'); return true; }
+    catch(e){
+      if(e && e.code==='declined') toast('Enregistrement annulé');
+      else if(e && e.code==='extension_not_enabled') toast('Format non autorisé dans cet hébergement — utilisez la version intranet','crit');
+      else toast('Enregistrement impossible ici','crit');
+      return false;
+    }
+  }
+  try{
+    const blob = new Blob([data], {type:mime||'text/plain;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    toast(okMsg,'good');
+    return true;
+  }catch(e){ toast('Téléchargement impossible ici','crit'); return false; }
+}
+
 async function downloadExport(){
   let data;
-  const filename = 'passerelle-mee-'+todayISO()+'.json';
   if(serverMode){
     try{
       const r = await fetch('/api/export', {headers:{Accept:'application/json'}});
@@ -2677,27 +2818,26 @@ async function downloadExport(){
   }else{
     data = exportJSON();
   }
-  /* Hébergée en Artifact claude.ai, la page passe par la capacité « downloads » */
-  const dl = (window.claude && typeof window.claude.use==='function')
-    ? await window.claude.use('downloads').catch(()=>null) : null;
-  if(dl){
-    try{ await dl.save({filename, data}); markExported(); toast('Export enregistré','good'); }
-    catch(e){
-      if(e && e.code==='declined') toast('Enregistrement annulé');
-      else toast('Enregistrement impossible — utilisez « Copier le JSON »','crit');
-    }
-    return;
-  }
-  try{
-    const blob = new Blob([data], {type:'application/json'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
-    markExported();
-    toast('Export téléchargé');
-  }catch(e){ toast('Téléchargement impossible ici — utilisez « Copier le JSON »','crit'); }
+  if(await saveTextFile('passerelle-mee-'+todayISO()+'.json', data, 'application/json', 'Export enregistré')) markExported();
+}
+
+/* Export CSV du portefeuille (respecte les filtres de la liste) */
+function csvEscape(v){
+  v = String(v==null?'':v);
+  return /[";\n\r]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v;
+}
+function buildCsv(ps){
+  const cf = state.settings.customFields;
+  const head = ['Nom','Type','Criticité','Étape','Statut','Préparation %','Porteur','Demandeur',
+    'Date cible','MEP réelle','Actions bloquantes ouvertes','Tickets Jira','Décision Go/No-Go']
+    .concat(cf.map(f=>f.label));
+  const rows = ps.map(p=>[
+    p.name, p.type, p.criticality, stageLabel(p.stage), platformStatus(p).label, score(p),
+    p.owner, p.sponsor, p.targetDate, p.goLiveDate, openBlocking(p).length,
+    (p.sync.issues||[]).length,
+    p.gonogo.decision ? (GG_LBL[p.gonogo.decision]+(p.gonogo.pending?' (à contre-valider)':'')) : '',
+  ].concat(cf.map(f=>(p.custom&&p.custom[f.id])||'')));
+  return '\ufeff'+[head].concat(rows).map(r=>r.map(csvEscape).join(';')).join('\r\n');
 }
 
 async function copyExport(){
@@ -2990,6 +3130,34 @@ document.addEventListener('click', e=>{
     }
     if(a==='make-backup'){ makeBackup('manuelle'); render(); toast('Sauvegarde locale créée','good'); return; }
     if(a==='export-download'){ downloadExport(); return; }
+    if(a==='export-csv'){
+      const ps = filteredPlatforms();
+      saveTextFile('passerelle-'+todayISO()+'.csv', buildCsv(ps), 'text/csv;charset=utf-8',
+        'CSV exporté ('+ps.length+' fiche'+(ps.length>1?'s':'')+')');
+      return;
+    }
+    if(a==='stats-reload'){ ui.stats = null; render(); return; }
+    if(a==='action-jira' && p){
+      const act = p.actions.find(x=>x.id===actEl.dataset.act);
+      if(!act || act.jiraKey) return;
+      actEl.disabled = true;
+      api('/api/jira/issue', {method:'POST', body:{
+        platformId: p.id,
+        summary: '[Passerelle] '+act.label+' — '+p.name,
+        description: 'Action de mise en exploitation pour « '+p.name+' » (criticité '+p.criticality+').'+
+          (act.due?' Échéance : '+act.due+'.':'')+(act.blocking?' Action BLOQUANTE pour le Go.':''),
+      }}).then(r=>{
+        act.jiraKey = r.key || '';
+        act.jiraUrl = safeUrl(r.url);
+        logJ(p, 'Ticket Jira '+r.key+' créé pour l’action : '+act.label);
+        saveState(); render();
+        toast('Ticket '+r.key+' créé','good');
+      }).catch(e=>{
+        toast('Création du ticket impossible : '+e.message,'crit');
+        render();
+      });
+      return;
+    }
     if(a==='export-copy'){ copyExport(); return; }
     if(a==='import-apply'){ const ta=$('#io-area'); if(ta && ta.value.trim()) importData(ta.value); else toast('Collez d’abord un export JSON dans la zone de texte','crit'); return; }
     if(a==='add-note') return; /* géré par submit */
@@ -3138,6 +3306,16 @@ document.addEventListener('change', e=>{
       it.crits.sort();
       return;
     }
+    return;
+  }
+  if(k==='int-jproj'){
+    state.settings.jiraProject = el.value.trim().toUpperCase();
+    saveState(); toast(state.settings.jiraProject?'Projet Jira : '+state.settings.jiraProject:'Projet Jira retiré');
+    return;
+  }
+  if(k==='int-jtype'){
+    state.settings.jiraIssueType = el.value.trim() || 'Task';
+    saveState(); toast('Type de ticket : '+state.settings.jiraIssueType);
     return;
   }
   if(k==='gng-validation'){
