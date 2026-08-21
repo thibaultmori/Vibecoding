@@ -341,8 +341,11 @@ function check(name, cond, detail) {
   /* ---------- 12. Mode serveur : référentiel partagé multi-utilisateurs ---------- */
   const SRV_URL = 'http://127.0.0.1:18811';
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pmee-e2e-'));
+  const atlStub = spawn('python3', [path.resolve(__dirname, 'stub-atlassian.py'), '19899',
+    path.join(os.tmpdir(), 'pmee-e2e-atl.log')], { stdio: 'ignore' });
   const srv = spawn('python3', [path.resolve(__dirname, '..', 'server.py'), '--port', '18811'],
-    { env: { ...process.env, DATA_DIR: dataDir, ADMIN_EMAILS: 'admin@test', WRITE_EMAILS: 'alice@test,admin@test' }, stdio: 'ignore' });
+    { env: { ...process.env, DATA_DIR: dataDir, ADMIN_EMAILS: 'admin@test', WRITE_EMAILS: 'alice@test,admin@test',
+      ATL_SITE: 'http://127.0.0.1:19899', ATL_EMAIL: 's@t', ATL_TOKEN: 'k', ATL_SYNC_MINUTES: '30' }, stdio: 'ignore' });
   let srvUp = false;
   for (let i = 0; i < 40; i++) {
     try { const r = await fetch(SRV_URL + '/healthz'); if (r.ok) { srvUp = true; break; } } catch (e) {}
@@ -490,10 +493,43 @@ function check(name, cond, detail) {
   await pd.waitForTimeout(700);
   check('champ personnalisé affiché en méta', (await pd.locator('.meta-grid').textContent()).includes('CI0042'));
 
+  /* ---------- 14. Phase 3 : ticket Jira, pilotage, CSV, synchro auto ---------- */
+  await pd.goto(SRV_URL + '/#/parametres');
+  await pd.waitForTimeout(400);
+  await pd.fill('#int-jproj', 'INF');
+  await pd.locator('#int-jproj').blur();
+  await pd.waitForTimeout(600);
+
+  await pd.goto(SRV_URL + '/' + ficheHash);
+  await pd.waitForTimeout(500);
+  await pd.click('button[data-action="add-action"]');
+  await pd.waitForTimeout(200);
+  await pd.fill('#fa-label', 'Ouvrir les flux réseau');
+  await pd.click('.modal button[type="submit"]');
+  await pd.waitForTimeout(700);
+  await pd.click('button[data-action="action-jira"]');
+  await pd.waitForTimeout(900);
+  check('ticket Jira créé depuis l’action (chip)', (await pd.locator('.act-row').first().textContent()).includes('INF-123'));
+  check('pied de synchro automatique affiché', (await pd.locator('.int-foot').textContent().catch(()=>'')) .includes('30 min')
+    || (await pd.locator('#view').textContent()).includes('30 min'));
+
+  await pd.goto(SRV_URL + '/#/pilotage');
+  await pd.waitForTimeout(900);
+  const pilTxt = await pd.locator('#view').textContent();
+  check('vue Pilotage : tuiles et graphiques', pilTxt.includes('Mises en production par mois') && pilTxt.includes('Temps moyen par étape'));
+  check('vue Pilotage : décision tracée', pilTxt.includes('GO : 1'));
+
+  await pd.goto(SRV_URL + '/#/plateformes');
+  await pd.waitForTimeout(400);
+  const [dlCsv] = await Promise.all([pd.waitForEvent('download'), pd.click('button[data-action="export-csv"]')]);
+  const csvTxt = fs.readFileSync(await dlCsv.path(), 'utf-8');
+  check('export CSV : en-têtes + fiches filtrées', csvTxt.includes('Criticité') && csvTxt.includes('Plateforme renommée en direct'));
+
   await ctxAdmin.close();
   await ctxAlice.close();
   await ctxBob.close();
   srv.kill();
+  atlStub.kill();
 
   /* ---------- Bilan ---------- */
   const realErrors = errors.filter(e => !e.includes('ERR_CONNECTION') && !e.includes('ERR_FAILED') && !e.includes('status of 400') && !e.includes('ERR_NAME_NOT_RESOLVED'));

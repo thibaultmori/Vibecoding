@@ -20,6 +20,10 @@ services:
       # PUBLIC_URL: "https://passerelle.mon-entreprise.fr"
       # NOTIFY_HOUR: "8"
       # DIGEST_DAY: "1"
+      # Synchronisation Atlassian automatique (minutes, 0 = désactivé)
+      # ATL_SYNC_MINUTES: "30"
+      # API machine (CMDB/ITSM) + flux iCalendar — jetons longs et aléatoires, séparés par des virgules
+      # API_TOKENS: "${API_TOKENS}"
     volumes:
       - passerelle-data:/data
     # Ne PAS publier ce port directement : seul oauth2-proxy doit y accéder.

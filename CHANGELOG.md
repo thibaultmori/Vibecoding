@@ -1,5 +1,17 @@
 # Journal des versions — Passerelle
 
+## 2.2.0 — 2026-08-21 · Pilotage & intégrations avancées (phase 3)
+
+La feuille de route initiale est complète.
+
+- **Page « Pilotage »** : le serveur historise créations, transitions d'étape et décisions (table dédiée, écrite au fil des écritures) et sert des agrégats (`/api/stats`) — MEP par mois (12 mois, complétées par les dates réelles des fiches antérieures), temps moyen par étape, délai médian création→MEP, décisions Go/No-Go, pages DMEX à rafraîchir, synchronisations anciennes.
+- **Création de tickets Jira depuis les actions** : bouton « Ticket Jira » sur chaque action (mode partagé) — le serveur appelle `POST /rest/api/3/issue` (vérifié sur la spec du jour) avec description **ADF**, type résolu en id via le nouveau `createmeta`, label `passerelle` (retiré automatiquement si l'écran du projet ne l'accepte pas) ; la clé revient en chip-lien sur l'action et au journal. Projet et type configurables (Paramètres, admin) ; le compte de service doit avoir « Browse projects » + « Create issues ».
+- **Synchronisation Atlassian automatique** : le serveur rafraîchit lui-même tickets et pages DMEX toutes les `ATL_SYNC_MINUTES` (défaut 30) et diffuse en SSE — plus besoin du bouton Synchroniser (conservé pour l'immédiat). Choix assumé à la place des webhooks entrants, qui exigeraient d'exposer l'application depuis Internet. Sonde : `POST /api/atlassian/sync-now` (admin).
+- **API machine (CMDB/ITSM)** : `GET /api/v1/platforms` (+ `/{id}`) en lecture seule sous jetons dédiés (`API_TOKENS`), avec statut dérivé et score calculés côté serveur.
+- **Flux iCalendar** : `GET /api/calendar.ics?token=…` — dates cibles des fiches actives + MEP réalisées (90 j), événements journée entière conformes RFC 5545 (UID stables, fin exclusive, échappement, CRLF pliés). Outlook n'authentifie pas les calendriers abonnés (jeton en URL) ; Outlook web relit le flux depuis le cloud Microsoft — documenté.
+- **Export CSV** du portefeuille (fiches filtrées, séparateur `;`, BOM Excel) depuis la vue Plateformes ; **rapport de revue imprimable** enrichi (en-tête d'édition, bloc signatures proposeur / contre-validateur).
+- Tests : 179 contrôles automatisés en CI (82 applicatifs, 73 serveur — dont création Jira sur stub avec vérification du corps ADF, stats, synchro auto, API v1, ICS —, 24 relais).
+
 ## 2.1.0 — 2026-08-21 · Collaboration & gouvernance (phase 2)
 
 - **Notifications** (mode partagé) : balayage quotidien à heure fixe — un e-mail par équipe (adresse du champ contact) listant ses éléments de checklist dus sous 7 jours ou en retard, plus une synthèse globale (dates cibles dépassées, actions bloquantes en retard, revues à tenir, décisions à contre-valider) vers une adresse de direction et/ou une **carte Teams** (webhook Workflows, format Adaptive Card v1.2 — les connecteurs O365 historiques sont retirés) ; digest hebdomadaire ; en-têtes d'automate anti-réponses d'absence ; aucun envoi s'il n'y a rien à dire ; endpoint d'exploitation `POST /api/notify/run` (admin).

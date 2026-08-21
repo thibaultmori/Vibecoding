@@ -78,25 +78,14 @@ HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
 EOF
 TEAMSSTUB=$!
 
-# --- Amont Atlassian factice ---
-python3 - "$STUB_PORT" <<'EOF' &
-import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-class H(BaseHTTPRequestHandler):
-    def log_message(self, *a): pass
-    def do_GET(self):
-        body = json.dumps({'displayName': 'Robot Stub', 'echo': self.path}).encode()
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
-EOF
+# --- Amont Atlassian factice (GET lecture + POST création, capture des corps) ---
+ATL_CAP="$DATA/atl-post.log"
+python3 tests/stub-atlassian.py "$STUB_PORT" "$ATL_CAP" &
 STUB=$!
 
 DATA_DIR="$DATA" ADMIN_EMAILS=admin@test WRITE_EMAILS='writer@test,admin@test' \
-ATL_SITE="http://127.0.0.1:$STUB_PORT" ATL_EMAIL=svc@t ATL_TOKEN=tk \
+ATL_SITE="http://127.0.0.1:$STUB_PORT" ATL_EMAIL=svc@t ATL_TOKEN=tk ATL_SYNC_MINUTES=0 \
+API_TOKENS='tok-cmdb-0001' \
 SMTP_HOST=127.0.0.1 SMTP_PORT=$SMTP_PORT SMTP_FROM=passerelle@test \
 TEAMS_WEBHOOK_URL="http://127.0.0.1:$TEAMS_PORT/hook" NOTIFY_EMAIL=direction@test \
 NOTIFY_HOUR=0 PUBLIC_URL=http://passerelle.test \
@@ -137,7 +126,7 @@ contains "SSE porte l'auteur" 'Wanda Writer' "$(cat "$DATA/sse.out")"
 # 5. Teams / settings
 contains "PUT teams contributeur" '"rev": 2' "$(curl -s -X PUT "${WRITER[@]}" "${JSONH[@]}" -d '{"rev":1,"data":[{"id":"t1","name":"Équipe test"}]}' "$B/api/teams")"
 expect "PUT settings contributeur → 403" 403 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT "${WRITER[@]}" "${JSONH[@]}" -d '{"rev":1,"data":{"readyThreshold":80}}' "$B/api/settings")"
-contains "PUT settings admin" '"rev": 2' "$(curl -s -X PUT "${ADMIN[@]}" "${JSONH[@]}" -d '{"rev":1,"data":{"readyThreshold":80,"dmexLabel":"asset-dip","siteUrl":""}}' "$B/api/settings")"
+contains "PUT settings admin" '"rev": 2' "$(curl -s -X PUT "${ADMIN[@]}" "${JSONH[@]}" -d '{"rev":1,"data":{"readyThreshold":80,"dmexLabel":"asset-dip","siteUrl":"https://ex.atlassian.net","jiraProject":"INF","jiraIssueType":"Task"}}' "$B/api/settings")"
 
 # 6. Audit nominatif
 AUD=$(curl -s "${READER[@]}" "$B/api/audit?limit=10")
@@ -182,7 +171,7 @@ TOMORROW=$(python3 -c "from datetime import date, timedelta; print(date.today()+
 YESTERDAY=$(python3 -c "from datetime import date, timedelta; print(date.today()-timedelta(days=1))")
 TREV=$(curl -s "${ADMIN[@]}" "$B/api/state" | python3 -c "import json,sys; print(json.load(sys.stdin)['teams']['rev'])")
 curl -s -X PUT "${WRITER[@]}" "${JSONH[@]}" -d '{"rev":'"$TREV"',"data":[{"id":"t1","name":"Équipe test","contact":"equipe@test"}]}' "$B/api/teams" >/dev/null
-curl -s -X POST "${WRITER[@]}" "${JSONH[@]}" -d '{"data":{"id":"p-n","name":"Fiche à échéances","stage":"build","targetDate":"'"$YESTERDAY"'","checklist":[{"id":"x.1","cat":"x","label":"Item avec échéance proche","status":"todo","team":"t1","due":"'"$TOMORROW"'"}],"actions":[{"id":"a1","label":"Action bloquante retardée","due":"'"$YESTERDAY"'","blocking":true,"done":false}]}}' "$B/api/platforms" >/dev/null
+curl -s -X POST "${WRITER[@]}" "${JSONH[@]}" -d '{"data":{"id":"p-n","name":"Fiche à échéances","stage":"build","targetDate":"'"$YESTERDAY"'","jiraJql":"project = INF","dmexPages":[{"id":"555001","url":""}],"checklist":[{"id":"x.1","cat":"x","label":"Item avec échéance proche","status":"todo","team":"t1","due":"'"$TOMORROW"'"}],"actions":[{"id":"a1","label":"Action bloquante retardée","due":"'"$YESTERDAY"'","blocking":true,"done":false}]}}' "$B/api/platforms" >/dev/null
 expect "notify/run par contributeur → 403" 403 "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${WRITER[@]}" "$B/api/notify/run")"
 NOTIF=$(curl -s -X POST "${ADMIN[@]}" "$B/api/notify/run")
 contains "notify/run admin" '"ok": true' "$NOTIF"
@@ -194,6 +183,40 @@ contains "SMTP : en-tête d'automate" 'Auto-Submitted: auto-generated' "$(cat "$
 contains "Teams : carte Adaptive au format Workflows" 'application/vnd.microsoft.card.adaptive' "$(cat "$TEAMS_CAP" 2>/dev/null)"
 contains "Teams : action bloquante signalée" 'Action bloquante' "$(cat "$TEAMS_CAP" 2>/dev/null)"
 contains "healthz expose les canaux" '"notify": "email+teams"' "$(curl -s "$B/healthz")"
+
+# 13. Phase 3 : tickets Jira, historique/stats, synchro auto, API machine, ICS
+expect "création ticket par lecteur → 403" 403 "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${READER[@]}" "${JSONH[@]}" -d '{"summary":"x"}' "$B/api/jira/issue")"
+JIRA=$(curl -s -X POST "${WRITER[@]}" "${JSONH[@]}" -d '{"platformId":"p-n","summary":"[Passerelle] Action bloquante retardée — Fiche à échéances","description":"Test"}' "$B/api/jira/issue")
+contains "ticket créé (clé + lien)" '"key": "INF-123"' "$JIRA"
+contains "corps Jira : description en ADF" '"type": "doc"' "$(cat "$ATL_CAP" 2>/dev/null)"
+contains "corps Jira : label passerelle" '"labels": ["passerelle"]' "$(cat "$ATL_CAP" 2>/dev/null)"
+contains "corps Jira : type résolu en id" '"id": "10001"' "$(cat "$ATL_CAP" 2>/dev/null)"
+
+curl -s -X PUT "${WRITER[@]}" "${JSONH[@]}" -d '{"rev":1,"data":{"id":"p-n","name":"Fiche à échéances","stage":"mep","goLiveDate":"'"$YESTERDAY"'","jiraJql":"project = INF","dmexPages":[{"id":"555001","url":""}],"checklist":[],"actions":[],"gonogo":{"decision":"go","pending":false,"decidedBy":"W","decidedByEmail":"writer@test"}}}' "$B/api/platforms/p-n" >/dev/null
+STATS=$(curl -s "${READER[@]}" "$B/api/stats")
+contains "stats : MEP du mois comptée" "\"month\": \"$(date +%Y-%m)\", \"count\": 1" "$STATS"
+contains "stats : temps par étape" '"stage": "build"' "$STATS"
+contains "stats : décisions tracées (p-g contre-validée + p-n directe)" '"go": 2' "$STATS"
+
+expect "sync-now par contributeur → 403" 403 "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${WRITER[@]}" "$B/api/atlassian/sync-now")"
+contains "sync-now admin" '"ok": true' "$(curl -s -X POST "${ADMIN[@]}" "$B/api/atlassian/sync-now")"
+SYNCED=$(curl -s "${READER[@]}" "$B/api/platforms/p-n")
+contains "synchro auto : tickets rafraîchis" '"key": "INF-7"' "$SYNCED"
+contains "synchro auto : page DMEX enrichie" '"Espace Stub"' "$SYNCED"
+contains "synchro auto : signée système" '"updatedBy": "synchro auto"' "$SYNCED"
+
+expect "API v1 sans jeton → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/v1/platforms")"
+expect "API v1 mauvais jeton → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer faux' "$B/api/v1/platforms")"
+V1=$(curl -s -H 'Authorization: Bearer tok-cmdb-0001' "$B/api/v1/platforms")
+contains "API v1 : liste avec statut dérivé" '"status": ' "$V1"
+contains "API v1 : score calculé" '"score": ' "$V1"
+expect "API v1 en écriture → 405" 405 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer tok-cmdb-0001' "$B/api/v1/platforms")"
+
+ICS=$(curl -s "$B/api/calendar.ics?token=tok-cmdb-0001")
+contains "ICS : calendrier servi" 'BEGIN:VCALENDAR' "$ICS"
+contains "ICS : MEP réalisée en événement" 'MEP réalisée' "$ICS"
+contains "ICS : fin de journée exclusive" 'DTEND;VALUE=DATE:' "$ICS"
+expect "ICS sans jeton → 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' "$B/api/calendar.ics")"
 
 kill $SRV $STUB $SMTPSTUB $TEAMSSTUB 2>/dev/null
 wait 2>/dev/null
